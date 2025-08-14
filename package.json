@@ -2,7 +2,11 @@
   "name": "efinance-stocks",
   "displayName": "EFinance Stocks",
   "description": "一个类似 LeekFund 的股票监控扩展：自选股、持仓股、策略监听",
-  "version": "0.0.2",
+  "version": "0.0.3",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cxczy/watchstock-vscode-plugin.git"
+  },
   "engines": {
     "vscode": "^1.85.0"
   },
