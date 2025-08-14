@@ -115,19 +115,42 @@ class BaseProvider<T> implements vscode.TreeDataProvider<StockTreeItem> {
 }
 
 class WatchlistProvider extends BaseProvider<StockBase> {
-    getChildren(): Promise<StockTreeItem[]> {
+    async getChildren(): Promise<StockTreeItem[]> {
         const list = this.store.getWatchlist();
-        return Promise.resolve(
-            list.map(s => new StockTreeItem(
-                `${s.symbol}${s.name ? ' · ' + s.name : ''}`,
-                vscode.TreeItemCollapsibleState.None,
-                {
-                    contextValue: 'efinance.watchItem',
-                    description: this.renderQuote(s),
-                    tooltip: this.renderTooltip(s)
-                }
-            ))
-        );
+        
+        // 获取股票行情数据
+        const symbols = list.map(s => s.symbol);
+        const quotes = await fetchQuotes(symbols, 'watchlist-view');
+        
+        // 更新股票价格和涨跌幅数据
+        const updatedList = list.map(stock => {
+            const quote = quotes[stock.symbol];
+            return {
+                ...stock,
+                price: quote?.price || stock.price,
+                change: quote?.change || stock.change
+            };
+        });
+        
+        // 按涨跌幅排序：涨幅大的在上面，跌幅大的在下面
+        const sortedList = updatedList.sort((a, b) => {
+            const changeA = a.change || 0;
+            const changeB = b.change || 0;
+            return changeB - changeA; // 降序排列
+        });
+        
+        // 更新存储的数据
+        await this.store.setWatchlist(sortedList);
+        
+        return sortedList.map(s => new StockTreeItem(
+            s.name ? `${s.name}(${s.symbol})` : s.symbol,
+            vscode.TreeItemCollapsibleState.None,
+            {
+                contextValue: 'efinance.watchItem',
+                description: this.renderQuote(s),
+                tooltip: this.renderTooltip(s)
+            }
+        ));
     }
 
     private renderQuote(s: StockBase): string | undefined {
@@ -147,27 +170,50 @@ class WatchlistProvider extends BaseProvider<StockBase> {
 }
 
 class HoldingsProvider extends BaseProvider<Holding> {
-    getChildren(): Promise<StockTreeItem[]> {
+    async getChildren(): Promise<StockTreeItem[]> {
         const list = this.store.getHoldings();
-        return Promise.resolve(
-            list.map(h => {
-                const pnl = (typeof h.price === 'number')
-                    ? (h.price - h.cost) * h.quantity
-                    : undefined;
-                const desc = typeof pnl === 'number'
-                    ? `现价 ${h.price?.toFixed(2)} | 持仓 ${h.quantity} | 成本 ${h.cost} | 浮盈 ${pnl.toFixed(2)}`
-                    : `持仓 ${h.quantity} | 成本 ${h.cost}`;
-                return new StockTreeItem(
-                    `${h.symbol}${h.name ? ' · ' + h.name : ''}`,
-                    vscode.TreeItemCollapsibleState.None,
-                    {
-                        contextValue: 'efinance.holdingItem',
-                        description: desc,
-                        tooltip: desc
-                    }
-                );
-            })
-        );
+        
+        // 获取股票行情数据
+        const symbols = list.map(h => h.symbol);
+        const quotes = await fetchQuotes(symbols, 'holdings-view');
+        
+        // 更新股票价格和涨跌幅数据
+        const updatedList = list.map(holding => {
+            const quote = quotes[holding.symbol];
+            return {
+                ...holding,
+                price: quote?.price || holding.price,
+                change: quote?.change || holding.change
+            };
+        });
+        
+        // 按涨跌幅排序：涨幅大的在上面，跌幅大的在下面
+        const sortedList = updatedList.sort((a, b) => {
+            const changeA = a.change || 0;
+            const changeB = b.change || 0;
+            return changeB - changeA; // 降序排列
+        });
+        
+        // 更新存储的数据
+        await this.store.setHoldings(sortedList);
+        
+        return sortedList.map(h => {
+            const pnl = (typeof h.price === 'number')
+                ? (h.price - h.cost) * h.quantity
+                : undefined;
+            const desc = typeof pnl === 'number'
+                ? `现价 ${h.price?.toFixed(2)} | 持仓 ${h.quantity} | 成本 ${h.cost} | 浮盈 ${pnl.toFixed(2)}`
+                : `持仓 ${h.quantity} | 成本 ${h.cost}`;
+            return new StockTreeItem(
+                h.name ? `${h.name}(${h.symbol})` : h.symbol,
+                vscode.TreeItemCollapsibleState.None,
+                {
+                    contextValue: 'efinance.holdingItem',
+                    description: desc,
+                    tooltip: desc
+                }
+            );
+        });
     }
 }
 
@@ -193,22 +239,40 @@ class StrategiesProvider extends BaseProvider<Strategy> {
             // 获取股票行情数据
             const quotes = await fetchQuotes(strategy.symbols, 'strategy-view');
             
-            return Promise.resolve(
-                strategy.symbols.map(sym => {
+            // 创建股票数据并获取名称
+            const stocksWithData = await Promise.all(
+                strategy.symbols.map(async sym => {
                     const quote = quotes[sym];
+                    const name = await fetchStockName(sym);
+                    return {
+                        symbol: sym,
+                        name: name,
+                        quote: quote,
+                        change: quote?.change || 0
+                    };
+                })
+            );
+            
+            // 按涨跌幅排序：涨幅大的在上面，跌幅大的在下面
+            const sortedStocks = stocksWithData.sort((a, b) => {
+                return b.change - a.change; // 降序排列
+            });
+            
+            return Promise.resolve(
+                sortedStocks.map(stock => {
                     let description = '';
                     let signalStatus = '';
-                    let tooltip = `股票: ${sym}`;
+                    let tooltip = `股票: ${stock.name}(${stock.symbol})`;
                     
-                    if (quote) {
-                        const changePercent = (quote.change * 100).toFixed(2);
-                        const changeColor = quote.change >= 0 ? '📈' : '📉';
-                        description = `¥${quote.price.toFixed(2)} ${changeColor}${changePercent}%`;
-                        tooltip += `\n当前价: ¥${quote.price.toFixed(2)}\n涨跌幅: ${changePercent}%`;
+                    if (stock.quote) {
+                        const changePercent = (stock.quote.change * 100).toFixed(2);
+                        const changeColor = stock.quote.change >= 0 ? '📈' : '📉';
+                        description = `¥${stock.quote.price.toFixed(2)} ${changeColor}${changePercent}%`;
+                        tooltip += `\n当前价: ¥${stock.quote.price.toFixed(2)}\n涨跌幅: ${changePercent}%`;
                         
                         // 检查买卖信号
                         if (strategy.signals || (strategy.type === 'script' && strategy.script?.enabled)) {
-                            const signals = this.checkSignals(quote, strategy);
+                            const signals = this.checkSignals(stock.quote, strategy);
                             if (signals.length > 0) {
                                 signalStatus = ` ${signals.join(' ')}`;
                                 tooltip += `\n信号: ${signals.join(', ')}`;
@@ -219,7 +283,7 @@ class StrategiesProvider extends BaseProvider<Strategy> {
                     }
                     
                     return new StockTreeItem(
-                        sym + signalStatus,
+                        (stock.name ? `${stock.name}(${stock.symbol})` : stock.symbol) + signalStatus,
                         vscode.TreeItemCollapsibleState.None,
                         {
                             contextValue: 'efinance.strategyStockItem',
@@ -339,6 +403,56 @@ class StrategiesProvider extends BaseProvider<Strategy> {
     }
 }
 
+// 获取股票名称
+async function fetchStockName(symbol: string): Promise<string> {
+    try {
+        // 格式化股票代码：沪市加sh前缀，深市加sz前缀
+        const code = symbol.replace(/[^0-9]/g, ''); // 只保留数字
+        let formattedSymbol: string;
+        if (code.startsWith('6')) {
+            formattedSymbol = `sh${code}`; // 沪市
+        } else if (code.startsWith('0') || code.startsWith('3')) {
+            formattedSymbol = `sz${code}`; // 深市
+        } else {
+            formattedSymbol = `sh${code}`; // 默认沪市
+        }
+
+        const url = `https://hq.sinajs.cn/list=${formattedSymbol}`;
+        
+        const response = await fetch(url, {
+            headers: {
+                'Referer': 'https://finance.sina.com.cn',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Accept-Charset': 'GBK,utf-8;q=0.7,*;q=0.3'
+            }
+        });
+        
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        
+        // 获取响应的ArrayBuffer，然后使用TextDecoder进行GBK解码
+        const buffer = await response.arrayBuffer();
+        const decoder = new TextDecoder('gbk');
+        const text = decoder.decode(buffer);
+        
+        const match = text.match(/var hq_str_[^=]+="([^"]+)";/);
+        
+        if (match && match[1]) {
+            const data = match[1].split(',');
+            if (data.length >= 1 && data[0]) {
+                return data[0]; // 股票名称在第一个位置
+            }
+        }
+        
+        // 如果获取失败，返回股票代码作为名称
+        return symbol;
+    } catch (error) {
+        console.error(`[fetchStockName] 获取股票名称失败: ${symbol}`, error);
+        return symbol; // 返回股票代码作为默认名称
+    }
+}
+
 // 获取真实股票行情数据
 async function fetchQuotes(symbols: string[], source: string = 'unknown'): Promise<Record<string, { price: number; change: number }>> {
     const result: Record<string, { price: number; change: number }> = {};
@@ -383,7 +497,8 @@ async function fetchQuotes(symbols: string[], source: string = 'unknown'): Promi
                 const response = await fetch(url, {
                     headers: {
                         'Referer': 'https://finance.sina.com.cn',
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                        'Accept-Charset': 'GBK,utf-8;q=0.7,*;q=0.3'
                     },
                     signal: controller.signal
                 });
@@ -394,7 +509,10 @@ async function fetchQuotes(symbols: string[], source: string = 'unknown'): Promi
                     throw new Error(`HTTP error! status: ${response.status}`);
                 }
                 
-                const text = await response.text();
+                // 获取响应的ArrayBuffer，然后使用TextDecoder进行GBK解码
+                const buffer = await response.arrayBuffer();
+                const decoder = new TextDecoder('gbk');
+                const text = decoder.decode(buffer);
                 console.log(`[fetchQuotes] 获取到响应数据长度: ${text.length}`);
                 
                 const lines = text.split('\n').filter(line => line.trim());
@@ -471,7 +589,7 @@ let refreshTimer: NodeJS.Timeout | undefined;
 function getConfig() {
     const config = vscode.workspace.getConfiguration('efinance');
     return {
-        refreshInterval: config.get<number>('refreshInterval', 60),
+        refreshInterval: config.get<number>('refreshInterval', 5),
         autoRefresh: config.get<boolean>('autoRefresh', true)
     };
 }
@@ -523,16 +641,26 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.commands.registerCommand('efinance.addWatchStock', async () => {
             const symbol = await vscode.window.showInputBox({ prompt: '输入股票代码（例如：600519 或 000001）' });
             if (!symbol) return;
-            const name = await vscode.window.showInputBox({ prompt: '输入股票名称（可选）' });
 
             const list = store.getWatchlist();
             if (list.some(s => s.symbol === symbol)) {
                 vscode.window.showInformationMessage(`自选股已存在：${symbol}`);
                 return;
             }
-            list.push({ symbol, name: name || undefined });
-            await store.setWatchlist(list);
-            watchProvider.refresh();
+
+            // 显示加载提示
+            vscode.window.withProgress({
+                location: vscode.ProgressLocation.Notification,
+                title: `正在获取股票信息: ${symbol}`,
+                cancellable: false
+            }, async () => {
+                // 自动获取股票名称
+                const name = await fetchStockName(symbol);
+                list.push({ symbol, name });
+                await store.setWatchlist(list);
+                watchProvider.refresh();
+                vscode.window.showInformationMessage(`已添加自选股：${name}(${symbol})`);
+            });
         })
     );
 
@@ -541,21 +669,30 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.commands.registerCommand('efinance.addHoldingStock', async () => {
             const symbol = await vscode.window.showInputBox({ prompt: '输入股票代码' });
             if (!symbol) return;
-            const name = await vscode.window.showInputBox({ prompt: '输入股票名称（可选）' });
             const quantityStr = await vscode.window.showInputBox({ prompt: '输入持仓数量（整数）', validateInput: v => /^\d+$/.test(v) ? null : '请输入整数' });
             if (!quantityStr) return;
             const costStr = await vscode.window.showInputBox({ prompt: '输入成本价（数字）', validateInput: v => isNaN(Number(v)) ? '请输入数字' : null });
             if (!costStr) return;
 
-            const holdings = store.getHoldings();
-            holdings.push({
-                symbol,
-                name: name || undefined,
-                quantity: parseInt(quantityStr, 10),
-                cost: parseFloat(costStr)
+            // 显示加载提示
+            vscode.window.withProgress({
+                location: vscode.ProgressLocation.Notification,
+                title: `正在获取股票信息: ${symbol}`,
+                cancellable: false
+            }, async () => {
+                // 自动获取股票名称
+                const name = await fetchStockName(symbol);
+                const holdings = store.getHoldings();
+                holdings.push({
+                    symbol,
+                    name,
+                    quantity: parseInt(quantityStr, 10),
+                    cost: parseFloat(costStr)
+                });
+                await store.setHoldings(holdings);
+                holdingProvider.refresh();
+                vscode.window.showInformationMessage(`已添加持仓股：${name}(${symbol})`);
             });
-            await store.setHoldings(holdings);
-            holdingProvider.refresh();
         })
     );
 
@@ -927,20 +1064,40 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(
         vscode.commands.registerCommand('efinance.removeItem', async (item?: StockTreeItem) => {
             if (!item) return;
-            const ok = await vscode.window.showWarningMessage(`确认删除：${item.label}？`, { modal: true }, '删除');
-            if (!ok) return;
-
+            
             // 根据 contextValue 判断来源
             switch (item.contextValue) {
                 case 'efinance.watchItem': {
-                    const list = store.getWatchlist().filter(s => (s.symbol !== item.label && `${s.symbol} · ${s.name ?? ''}` !== item.label));
+                    // 从显示标签中提取股票代码
+                    let symbolToRemove = '';
+                    if (item.label.includes('(') && item.label.includes(')')) {
+                        // 格式：名称(代码)
+                        const match = item.label.match(/\(([^)]+)\)$/);
+                        symbolToRemove = match ? match[1] : item.label;
+                    } else {
+                        // 格式：只有代码
+                        symbolToRemove = item.label;
+                    }
+                    
+                    const list = store.getWatchlist().filter(s => s.symbol !== symbolToRemove);
                     await store.setWatchlist(list);
                     watchProvider.refresh();
                     strategyProvider.refresh();
                     break;
                 }
                 case 'efinance.holdingItem': {
-                    const holdings = store.getHoldings().filter(h => (h.symbol !== item.label && `${h.symbol} · ${h.name ?? ''}` !== item.label));
+                    // 从显示标签中提取股票代码
+                    let symbolToRemove = '';
+                    if (item.label.includes('(') && item.label.includes(')')) {
+                        // 格式：名称(代码)
+                        const match = item.label.match(/\(([^)]+)\)$/);
+                        symbolToRemove = match ? match[1] : item.label;
+                    } else {
+                        // 格式：只有代码
+                        symbolToRemove = item.label;
+                    }
+                    
+                    const holdings = store.getHoldings().filter(h => h.symbol !== symbolToRemove);
                     await store.setHoldings(holdings);
                     holdingProvider.refresh();
                     break;
