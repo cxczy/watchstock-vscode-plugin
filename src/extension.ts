@@ -13,7 +13,7 @@ type Holding = StockBase & {
     cost: number;     // 成本价
 };
 
-type Strategy = {
+export type Strategy = {
     id: string;
     name: string;
     symbols: string[]; // 关注的股票代码
@@ -48,7 +48,7 @@ type Strategy = {
     };
 };
 
-class Store {
+export class Store {
     private readonly WATCH_KEY = 'efinance.watchlist';
     private readonly HOLD_KEY = 'efinance.holdings';
     private readonly STRA_KEY = 'efinance.strategies';
@@ -1055,6 +1055,16 @@ export function activate(context: vscode.ExtensionContext) {
                     const message = `🟢 买入信号：${symbol} - Pine脚本策略触发`;
                     vscode.window.showInformationMessage(message);
                     console.log(`[Pine脚本信号] ${strategy.name}: ${message}`);
+                    
+                    // 记录信号到策略监控面板
+                    const { StrategyDashboardPanel } = require('./strategyDashboard');
+                    StrategyDashboardPanel.addSignal(
+                        strategy.name,
+                        symbol,
+                        'buy',
+                        quote.price,
+                        'Pine脚本买入条件触发'
+                    );
                 }
             }
             
@@ -1065,6 +1075,16 @@ export function activate(context: vscode.ExtensionContext) {
                     const message = `🔴 卖出信号：${symbol} - Pine脚本策略触发`;
                     vscode.window.showWarningMessage(message);
                     console.log(`[Pine脚本信号] ${strategy.name}: ${message}`);
+                    
+                    // 记录信号到策略监控面板
+                    const { StrategyDashboardPanel } = require('./strategyDashboard');
+                    StrategyDashboardPanel.addSignal(
+                        strategy.name,
+                        symbol,
+                        'sell',
+                        quote.price,
+                        'Pine脚本卖出条件触发'
+                    );
                 }
             }
             
@@ -1097,6 +1117,16 @@ export function activate(context: vscode.ExtensionContext) {
                 const message = `🟢 买入信号：${symbol} - ${reason}`;
                 vscode.window.showInformationMessage(message);
                 console.log(`[策略信号] ${strategy.name}: ${message}`);
+                
+                // 记录信号到策略监控面板
+                const { StrategyDashboardPanel } = require('./strategyDashboard');
+                StrategyDashboardPanel.addSignal(
+                    strategy.name,
+                    symbol,
+                    'buy',
+                    quote.price,
+                    reason
+                );
             }
         }
         
@@ -1120,9 +1150,27 @@ export function activate(context: vscode.ExtensionContext) {
                 const message = `🔴 卖出信号：${symbol} - ${reason}`;
                 vscode.window.showWarningMessage(message);
                 console.log(`[策略信号] ${strategy.name}: ${message}`);
+                
+                // 记录信号到策略监控面板
+                const { StrategyDashboardPanel } = require('./strategyDashboard');
+                StrategyDashboardPanel.addSignal(
+                    strategy.name,
+                    symbol,
+                    'sell',
+                    quote.price,
+                    reason
+                );
             }
         }
     }
+
+    // 注册策略监控面板命令
+    context.subscriptions.push(
+        vscode.commands.registerCommand('efinance.openStrategyDashboard', async () => {
+            const { StrategyDashboardPanel } = require('./strategyDashboard');
+            StrategyDashboardPanel.createOrShow(context.extensionUri, store);
+        })
+    );
 
     // 设置可配置的定时刷新
     setupAutoRefresh(context);
