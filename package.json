@@ -2,20 +2,19 @@
   "name": "efinance-stocks",
   "displayName": "EFinance Stocks",
   "description": "一个类似 LeekFund 的股票监控扩展：自选股、持仓股、策略监听",
-  "version": "0.0.3",
+  "version": "0.0.5",
   "repository": {
     "type": "git",
     "url": "https://github.com/cxczy/watchstock-vscode-plugin.git"
   },
+  "license": "MIT",
   "engines": {
     "vscode": "^1.85.0"
   },
   "categories": [
     "Other"
   ],
-  "activationEvents": [
-    "*"
-  ],
+  "activationEvents": [],
   "main": "./out/extension.js",
   "contributes": {
     "configuration": {
@@ -43,18 +42,21 @@
     "views": {
       "explorer": [
         {
+          "icon": "$(eye)",
           "id": "efinance.watchlist",
-          "name": "自选股",
+          "name": "zx",
           "when": "config.efinance.showInExplorer"
         },
         {
+          "icon": "$(briefcase)",
           "id": "efinance.holdings",
-          "name": "持仓股",
+          "name": "cc",
           "when": "config.efinance.showInExplorer"
         },
         {
+          "icon": "$(graph)",
           "id": "efinance.strategies",
-          "name": "策略监听",
+          "name": "str",
           "when": "config.efinance.showInExplorer"
         }
       ]
@@ -62,23 +64,23 @@
     "commands": [
       {
         "command": "efinance.addWatchStock",
-        "title": "添加自选股"
+        "title": "添加zx"
       },
       {
         "command": "efinance.addHoldingStock",
-        "title": "添加持仓股"
+        "title": "添加cc"
       },
       {
         "command": "efinance.addStrategy",
-        "title": "创建策略"
+        "title": "创建str"
       },
       {
         "command": "efinance.refreshAll",
-        "title": "刷新股票数据"
+        "title": "刷新"
       },
       {
         "command": "efinance.removeItem",
-        "title": "删除项目"
+        "title": "删除"
       }
     ],
     "menus": {
