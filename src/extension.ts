@@ -21,6 +21,17 @@ export type Strategy = {
     // 策略类型：'simple' 为简单阈值策略，'script' 为Pine脚本策略
     type?: 'simple' | 'script';
     
+    // 股票配置列表（新增，用于扁平化数据结构）
+    stocks?: {
+        symbol: string;
+        name?: string;
+        enabled: boolean;
+        config?: any; // 策略参数配置
+        presetStrategy?: string; // 预设策略名称
+        strategyType?: string; // 策略类型
+        updatedAt?: string; // 更新时间
+    }[];
+    
     // Pine脚本配置（新增）
     script?: {
         buyScript?: string;         // 买入信号Pine脚本
@@ -219,81 +230,95 @@ class HoldingsProvider extends BaseProvider<Holding> {
 
 class StrategiesProvider extends BaseProvider<Strategy> {
     async getChildren(element?: StockTreeItem): Promise<StockTreeItem[]> {
-        const list = this.store.getStrategies();
-        if (!element) {
-            return Promise.resolve(
-                list.map(st => new StockTreeItem(
-                    st.name,
-                    vscode.TreeItemCollapsibleState.Collapsed,
-                    {
-                        contextValue: 'efinance.strategyItem',
-                        description: `${st.symbols.length} 支股票`,
-                        tooltip: `策略: ${st.name}\n股票: ${st.symbols.join(', ')}`
-                    }
-                ))
-            );
-        } else {
-            const strategy = list.find(s => s.name === element.label);
-            if (!strategy) return Promise.resolve([]);
-            
-            // 获取股票行情数据
-            const quotes = await fetchQuotes(strategy.symbols, 'strategy-view');
-            
-            // 创建股票数据并获取名称
-            const stocksWithData = await Promise.all(
-                strategy.symbols.map(async sym => {
-                    const quote = quotes[sym];
-                    const name = await fetchStockName(sym);
-                    return {
-                        symbol: sym,
-                        name: name,
-                        quote: quote,
-                        change: quote?.change || 0
-                    };
-                })
-            );
-            
-            // 按涨跌幅排序：涨幅大的在上面，跌幅大的在下面
-            const sortedStocks = stocksWithData.sort((a, b) => {
-                return b.change - a.change; // 降序排列
-            });
-            
-            return Promise.resolve(
-                sortedStocks.map(stock => {
-                    let description = '';
-                    let signalStatus = '';
-                    let tooltip = `股票: ${stock.name}(${stock.symbol})`;
+        // 扁平化显示：直接显示所有涉及策略的股票，不再按策略分组
+        const strategies = this.store.getStrategies();
+        
+        // 收集所有股票及其关联的策略
+        const stockStrategyMap = new Map<string, { strategies: Strategy[], name?: string }>();
+        
+        for (const strategy of strategies) {
+            for (const symbol of strategy.symbols) {
+                if (!stockStrategyMap.has(symbol)) {
+                    stockStrategyMap.set(symbol, { strategies: [] });
+                }
+                stockStrategyMap.get(symbol)!.strategies.push(strategy);
+            }
+        }
+        
+        if (stockStrategyMap.size === 0) {
+            return Promise.resolve([]);
+        }
+        
+        // 获取所有股票的行情数据
+        const allSymbols = Array.from(stockStrategyMap.keys());
+        const quotes = await fetchQuotes(allSymbols, 'strategy-view');
+        
+        // 创建股票数据并获取名称
+        const stocksWithData = await Promise.all(
+            Array.from(stockStrategyMap.entries()).map(async ([symbol, data]) => {
+                const quote = quotes[symbol];
+                const name = await fetchStockName(symbol);
+                return {
+                    symbol,
+                    name,
+                    quote,
+                    change: quote?.change || 0,
+                    strategies: data.strategies
+                };
+            })
+        );
+        
+        // 按涨跌幅排序：涨幅大的在上面，跌幅大的在下面
+        const sortedStocks = stocksWithData.sort((a, b) => {
+            return b.change - a.change; // 降序排列
+        });
+        
+        return Promise.resolve(
+            sortedStocks.map(stock => {
+                let description = '';
+                let signalStatus = '';
+                let tooltip = `股票: ${stock.name}(${stock.symbol})`;
+                
+                // 添加策略信息到tooltip
+                const strategyNames = stock.strategies.map(s => s.name).join(', ');
+                tooltip += `\n关联策略: ${strategyNames}`;
+                
+                if (stock.quote) {
+                    const changePercent = (stock.quote.change * 100).toFixed(2);
+                    const changeColor = stock.quote.change >= 0 ? '📈' : '📉';
+                    description = `¥${stock.quote.price.toFixed(2)} ${changeColor}${changePercent}%`;
+                    tooltip += `\n当前价: ¥${stock.quote.price.toFixed(2)}\n涨跌幅: ${changePercent}%`;
                     
-                    if (stock.quote) {
-                        const changePercent = (stock.quote.change * 100).toFixed(2);
-                        const changeColor = stock.quote.change >= 0 ? '📈' : '📉';
-                        description = `¥${stock.quote.price.toFixed(2)} ${changeColor}${changePercent}%`;
-                        tooltip += `\n当前价: ¥${stock.quote.price.toFixed(2)}\n涨跌幅: ${changePercent}%`;
-                        
-                        // 检查买卖信号
+                    // 检查所有关联策略的买卖信号
+                    const allSignals: string[] = [];
+                    for (const strategy of stock.strategies) {
                         if (strategy.signals || (strategy.type === 'script' && strategy.script?.enabled)) {
                             const signals = this.checkSignals(stock.quote, strategy);
-                            if (signals.length > 0) {
-                                signalStatus = ` ${signals.join(' ')}`;
-                                tooltip += `\n信号: ${signals.join(', ')}`;
-                            }
+                            allSignals.push(...signals);
                         }
-                    } else {
-                        description = '数据获取中...';
                     }
                     
-                    return new StockTreeItem(
-                        (stock.name ? `${stock.name}(${stock.symbol})` : stock.symbol) + signalStatus,
-                        vscode.TreeItemCollapsibleState.None,
-                        {
-                            contextValue: 'efinance.strategyStockItem',
-                            description: description,
-                            tooltip: tooltip
-                        }
-                    );
-                })
-            );
-        }
+                    // 去重并显示信号
+                    const uniqueSignals = [...new Set(allSignals)];
+                    if (uniqueSignals.length > 0) {
+                        signalStatus = ` ${uniqueSignals.join(' ')}`;
+                        tooltip += `\n信号: ${uniqueSignals.join(', ')}`;
+                    }
+                } else {
+                    description = '数据获取中...';
+                }
+                
+                return new StockTreeItem(
+                    (stock.name ? `${stock.name}(${stock.symbol})` : stock.symbol) + signalStatus,
+                    vscode.TreeItemCollapsibleState.None,
+                    {
+                        contextValue: 'efinance.strategyStockItem',
+                        description: description,
+                        tooltip: tooltip
+                    }
+                );
+            })
+        );
     }
     
     // 检查买卖信号（支持Pine脚本和传统阈值策略）

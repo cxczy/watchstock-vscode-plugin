@@ -2,17 +2,42 @@ import * as vscode from 'vscode';
 import { Strategy, Store } from './extension';
 
 /**
- * 策略监控面板数据接口
+ * 策略监控面板数据接口 - 扁平化结构
  */
 export interface StrategyDashboardData {
-    strategies: StrategyWithStats[];
+    stockStrategies: StockStrategyItem[];  // 扁平化的股票-策略组合列表
     lastUpdate: string;
     totalSignals: number;
     activeStrategies: number;
 }
 
 /**
- * 带统计信息的策略接口
+ * 扁平化的股票-策略组合接口
+ */
+export interface StockStrategyItem {
+    id: string;                     // 唯一标识：stockSymbol_strategyId
+    stockSymbol: string;            // 股票代码
+    stockName: string;              // 股票名称
+    strategyId: string;             // 策略ID
+    strategyName: string;           // 策略名称
+    strategyType: string;           // 策略类型
+    price?: number;                 // 股票价格
+    change?: number;                // 涨跌幅
+    changePercent?: number;         // 涨跌幅百分比
+    signals: string[];              // 当前信号状态
+    lastUpdate?: string;            // 最后更新时间
+    isActive: boolean;              // 策略是否活跃
+    stats: {
+        totalSignals: number;       // 总信号数
+        buySignals: number;         // 买入信号数
+        sellSignals: number;        // 卖出信号数
+        lastSignalTime?: number;    // 最后信号时间
+    };
+    performance: StrategyPerformance;
+}
+
+/**
+ * 带统计信息的策略接口（保留用于兼容性）
  */
 export interface StrategyWithStats {
     id: string;
@@ -78,7 +103,7 @@ export class StrategyDashboardPanel {
     private _updateTimer: NodeJS.Timeout | undefined;
     private _lastUpdateTime: Date = new Date();
 
-    public static createOrShow(store: Store) {
+    public static createOrShow(extensionUri: vscode.Uri, store: Store) {
         const column = vscode.window.activeTextEditor
             ? vscode.window.activeTextEditor.viewColumn
             : undefined;
@@ -121,13 +146,28 @@ export class StrategyDashboardPanel {
                         await this._updateContent();
                         vscode.window.showInformationMessage('策略数据已刷新');
                         break;
-                    case 'toggleStrategy':
-                        await this._toggleStrategy(message.strategyId);
+                    case 'toggleStockStrategy':
+                        await this._toggleStockStrategy(message.stockSymbol, message.strategyName);
                         break;
                     case 'clearHistory':
                         this._clearSignalHistory();
                         await this._updateContent();
                         vscode.window.showInformationMessage('信号历史已清空');
+                        break;
+                    case 'configureStockStrategy':
+                        this._configureStockStrategy(message.stockSymbol, message.strategyName);
+                        break;
+                    case 'selectPresetStrategy':
+                        this._selectPresetStrategy(message.stockSymbol, message.strategyName, message.presetStrategy);
+                        break;
+                    case 'createPineScript':
+                        this._createPineScript();
+                        break;
+                    case 'managePineScripts':
+                        this._managePineScripts();
+                        break;
+                    case 'configurePineScript':
+                        this._configurePineScript(message.scriptName);
                         break;
                 }
             },
@@ -142,42 +182,42 @@ export class StrategyDashboardPanel {
 
 
     /**
-     * 切换策略启用状态
+     * 切换股票-策略组合的启用状态
      */
-    private async _toggleStrategy(strategyId: string) {
+    private async _toggleStockStrategy(stockSymbol: string, strategyName: string) {
         const strategies = this._store.getStrategies();
-        const strategy = strategies.find((s: any) => s.name === strategyId);
+        const strategy = strategies.find((s: any) => s.name === strategyName);
         
         if (!strategy) {
-            vscode.window.showErrorMessage(`未找到策略: ${strategyId}`);
+            vscode.window.showErrorMessage(`未找到策略: ${strategyName}`);
             return;
         }
         
-        // 切换策略状态
-        if (strategy.type === 'script' && strategy.script) {
-            strategy.script.enabled = !strategy.script.enabled;
-            const status = strategy.script.enabled ? '启用' : '禁用';
-            vscode.window.showInformationMessage(`Pine脚本策略 "${strategy.name}" 已${status}`);
-        } else if (strategy.signals) {
-            // 对于传统策略，切换买入和卖出条件的启用状态
-            const currentlyEnabled = strategy.signals.buyConditions?.enabled || strategy.signals.sellConditions?.enabled;
-            
-            if (strategy.signals.buyConditions) {
-                strategy.signals.buyConditions.enabled = !currentlyEnabled;
-            }
-            if (strategy.signals.sellConditions) {
-                strategy.signals.sellConditions.enabled = !currentlyEnabled;
-            }
-            
-            const status = !currentlyEnabled ? '启用' : '禁用';
-            vscode.window.showInformationMessage(`传统策略 "${strategy.name}" 已${status}`);
+        // 确保策略有stocks数组
+        if (!strategy.stocks) {
+            strategy.stocks = [];
         }
+        
+        // 查找或创建股票配置
+        let stockConfig = strategy.stocks.find((stock: any) => stock.symbol === stockSymbol);
+        if (!stockConfig) {
+            stockConfig = {
+                symbol: stockSymbol,
+                enabled: true
+            };
+            strategy.stocks.push(stockConfig);
+        }
+        
+        // 切换股票在该策略中的启用状态
+        stockConfig.enabled = !stockConfig.enabled;
+        const status = stockConfig.enabled ? '启用' : '禁用';
         
         // 保存更新后的策略
         await this._store.setStrategies(strategies);
         await this._updateContent();
         
-        console.log(`策略 ${strategyId} 状态已切换`);
+        vscode.window.showInformationMessage(`股票 ${stockSymbol} 在策略 "${strategyName}" 中已${status}`);
+        console.log(`股票 ${stockSymbol} 在策略 ${strategyName} 中的状态已切换为: ${stockConfig.enabled}`);
     }
 
     /**
@@ -187,6 +227,585 @@ export class StrategyDashboardPanel {
         this._signalHistory = [];
         this._update();
         vscode.window.showInformationMessage('信号历史已清空');
+    }
+
+    private async _configureStrategy(strategyId: string) {
+        // 获取策略信息
+        const strategies = this._store.getStrategies();
+        const strategy = strategies.find((s: any) => s.name === strategyId);
+        if (!strategy) {
+            vscode.window.showErrorMessage('未找到指定策略');
+            return;
+        }
+
+        // 根据策略类型显示不同的配置选项
+        const strategyType = this._getStrategyType(strategy.name);
+        const config = await this._showStrategyConfigDialog(strategy, strategyType);
+        
+        if (config) {
+            // 保存策略配置
+            await this._saveStrategyConfig(strategyId, config);
+            vscode.window.showInformationMessage(`策略 ${strategy.name} 配置已更新`);
+            this._update();
+        }
+    }
+
+    private async _configureStockStrategy(stockSymbol: string, strategyName: string) {
+        // 获取策略信息
+        const strategies = this._store.getStrategies();
+        const strategy = strategies.find((s: any) => s.name === strategyName);
+        if (!strategy) {
+            vscode.window.showErrorMessage('未找到指定策略');
+            return;
+        }
+
+        // 根据策略类型显示不同的配置选项
+        const strategyType = this._getStrategyType(strategy.name);
+        const config = await this._showStockStrategyConfigDialog(strategy, stockSymbol, strategyType);
+        
+        if (config) {
+            // 保存股票策略配置
+            await this._saveStockStrategyConfig(strategyName, stockSymbol, config);
+            vscode.window.showInformationMessage(`股票 ${stockSymbol} 在策略 ${strategy.name} 中的配置已更新`);
+            await this._updateContent();
+        }
+    }
+
+    private async _selectPresetStrategy(stockSymbol: string, strategyName: string, presetStrategy: string) {
+        try {
+            // 获取当前策略信息
+            const strategies = this._store.getStrategies();
+            const strategy = strategies.find((s: any) => s.name === strategyName);
+            if (!strategy) {
+                vscode.window.showErrorMessage('未找到指定策略');
+                return;
+            }
+
+            // 确保策略有stocks数组
+            if (!strategy.stocks) {
+                strategy.stocks = [];
+            }
+            
+            // 查找或创建股票配置
+            let stockConfig = strategy.stocks.find((stock: any) => stock.symbol === stockSymbol);
+            if (!stockConfig) {
+                stockConfig = {
+                    symbol: stockSymbol,
+                    enabled: true
+                };
+                strategy.stocks.push(stockConfig);
+            }
+            
+            // 应用预设策略配置
+            stockConfig.presetStrategy = presetStrategy;
+            stockConfig.strategyType = presetStrategy;
+            
+            // 保存更新后的策略
+            await this._store.setStrategies(strategies);
+            await this._updateContent();
+            
+            vscode.window.showInformationMessage(`股票 ${stockSymbol} 已应用预设策略 ${presetStrategy}`);
+        } catch (error) {
+            console.error('选择预设策略失败:', error);
+            vscode.window.showErrorMessage('选择预设策略失败');
+        }
+    }
+
+    /**
+     * 创建Pine脚本策略
+     */
+    private async _createPineScript() {
+        try {
+            // 调用extension.ts中的addScriptStrategy命令
+            await vscode.commands.executeCommand('efinance.addScriptStrategy');
+            
+            // 刷新面板内容
+            await this._updateContent();
+        } catch (error) {
+            console.error('创建Pine脚本失败:', error);
+            vscode.window.showErrorMessage('创建Pine脚本失败');
+        }
+    }
+
+    /**
+     * 管理Pine脚本策略
+     */
+    private async _managePineScripts() {
+        try {
+            const strategies = this._store.getStrategies();
+            const scriptStrategies = strategies.filter((s: any) => s.type === 'script');
+            
+            if (scriptStrategies.length === 0) {
+                vscode.window.showInformationMessage('暂无Pine脚本策略，请先创建一个');
+                return;
+            }
+            
+            // 显示Pine脚本列表供用户选择
+            const items = scriptStrategies.map((strategy: any) => ({
+                label: strategy.name,
+                description: strategy.script?.enabled ? '✅ 已启用' : '❌ 已禁用',
+                detail: `符号: ${strategy.symbols?.join(', ') || '无'}`
+            }));
+            
+            items.push({
+                label: '$(add) 创建新的Pine脚本',
+                description: '创建一个新的Pine脚本策略',
+                detail: ''
+            });
+            
+            const selected = await vscode.window.showQuickPick(items, {
+                placeHolder: '选择要管理的Pine脚本策略'
+            });
+            
+            if (selected) {
+                if (selected.label.includes('创建新的Pine脚本')) {
+                    await this._createPineScript();
+                } else {
+                    await this._configurePineScript(selected.label);
+                }
+            }
+        } catch (error) {
+            console.error('管理Pine脚本失败:', error);
+            vscode.window.showErrorMessage('管理Pine脚本失败');
+        }
+    }
+
+    /**
+     * 配置Pine脚本策略
+     */
+    private async _configurePineScript(scriptName: string) {
+        try {
+            // 调用extension.ts中的configureScriptStrategy命令
+            await vscode.commands.executeCommand('efinance.configureScriptStrategy', scriptName);
+            
+            // 刷新面板内容
+            await this._updateContent();
+        } catch (error) {
+            console.error('配置Pine脚本失败:', error);
+            vscode.window.showErrorMessage('配置Pine脚本失败');
+        }
+    }
+
+    private _getStrategyType(strategyName: string): string {
+        if (strategyName.includes('均线') || strategyName.includes('MA')) {
+            return 'ma';
+        } else if (strategyName.includes('KDJ')) {
+            return 'kdj';
+        } else if (strategyName.includes('RSI')) {
+            return 'rsi';
+        }
+        return 'unknown';
+    }
+
+    private async _showStrategyConfigDialog(strategy: any, strategyType: string): Promise<any> {
+        const items: vscode.QuickPickItem[] = [];
+        
+        switch (strategyType) {
+            case 'ma':
+                items.push(
+                    { label: '配置均线周期', description: '设置跟踪的均线周期' },
+                    { label: '配置时间周期', description: '设置K线时间周期' }
+                );
+                break;
+            case 'kdj':
+                items.push(
+                    { label: '配置KDJ参数', description: '设置KDJ指标参数' },
+                    { label: '配置时间周期', description: '设置K线时间周期' }
+                );
+                break;
+            case 'rsi':
+                items.push(
+                    { label: '配置RSI参数', description: '设置RSI指标参数' },
+                    { label: '配置时间周期', description: '设置K线时间周期' }
+                );
+                break;
+            default:
+                items.push(
+                    { label: '配置时间周期', description: '设置K线时间周期' }
+                );
+        }
+
+        const selected = await vscode.window.showQuickPick(items, {
+            placeHolder: `配置策略: ${strategy.name}`
+        });
+
+        if (!selected) {
+            return null;
+        }
+
+        if (selected.label === '配置均线周期') {
+            return await this._configureMAPeriod();
+        } else if (selected.label === '配置时间周期') {
+            return await this._configureTimePeriod();
+        } else if (selected.label === '配置KDJ参数') {
+            return await this._configureKDJParams();
+        } else if (selected.label === '配置RSI参数') {
+            return await this._configureRSIParams();
+        }
+
+        return null;
+    }
+
+    private async _configureMAPeriod(): Promise<any> {
+        const periods = [
+            { label: '5日均线', value: 5 },
+            { label: '10日均线', value: 10 },
+            { label: '20日均线', value: 20 },
+            { label: '30日均线', value: 30 },
+            { label: '60日均线', value: 60 }
+        ];
+
+        const selected = await vscode.window.showQuickPick(
+            periods.map(p => ({ label: p.label, description: `周期: ${p.value}` })),
+            { placeHolder: '选择均线周期' }
+        );
+
+        if (selected) {
+            const period = periods.find(p => p.label === selected.label);
+            return { type: 'ma', period: period?.value };
+        }
+        return null;
+    }
+
+    private async _configureTimePeriod(): Promise<any> {
+        const periods = [
+            { label: '15分钟', value: '15m' },
+            { label: '60分钟', value: '60m' },
+            { label: '日线', value: '1d' },
+            { label: '周线', value: '1w' }
+        ];
+
+        const selected = await vscode.window.showQuickPick(
+            periods.map(p => ({ label: p.label })),
+            { placeHolder: '选择时间周期' }
+        );
+
+        if (selected) {
+            const period = periods.find(p => p.label === selected.label);
+            return { type: 'timeframe', period: period?.value };
+        }
+        return null;
+    }
+
+    private async _configureKDJParams(): Promise<any> {
+        const kPeriod = await vscode.window.showInputBox({
+            prompt: '请输入K值周期',
+            value: '9',
+            validateInput: (value) => {
+                const num = parseInt(value);
+                if (isNaN(num) || num <= 0) {
+                    return '请输入有效的正整数';
+                }
+                return null;
+            }
+        });
+
+        if (kPeriod) {
+            return { type: 'kdj', kPeriod: parseInt(kPeriod), dPeriod: 3, jPeriod: 3 };
+        }
+        return null;
+    }
+
+    private async _configureRSIParams(): Promise<any> {
+        const period = await vscode.window.showInputBox({
+            prompt: '请输入RSI周期',
+            value: '14',
+            validateInput: (value) => {
+                const num = parseInt(value);
+                if (isNaN(num) || num <= 0) {
+                    return '请输入有效的正整数';
+                }
+                return null;
+            }
+        });
+
+        if (period) {
+            return { type: 'rsi', period: parseInt(period) };
+        }
+        return null;
+    }
+
+    private async _saveStrategyConfig(strategyId: string, config: any): Promise<void> {
+        // 这里应该保存到配置文件或数据库
+        // 暂时只是显示配置信息
+        console.log(`保存策略配置: ${strategyId}`, config);
+        
+        // 可以通过vscode.workspace.getConfiguration()来保存配置
+        const workspaceConfig = vscode.workspace.getConfiguration('watchstock');
+        const strategies: { [key: string]: any } = workspaceConfig.get('strategies', {});
+        strategies[strategyId] = { ...strategies[strategyId], ...config };
+        await workspaceConfig.update('strategies', strategies, vscode.ConfigurationTarget.Workspace);
+    }
+
+    private async _showStockStrategyConfigDialog(strategy: any, stockSymbol: string, strategyType: string): Promise<any> {
+        const title = `配置股票 ${stockSymbol} 的策略参数 - ${strategy.name}`;
+        
+        switch (strategyType) {
+            case 'MA':
+                return await this._configureStockMAPeriod(stockSymbol, strategy);
+            case 'TIME':
+                return await this._configureStockTimePeriod(stockSymbol, strategy);
+            case 'KDJ':
+                return await this._configureStockKDJParams(stockSymbol, strategy);
+            case 'RSI':
+                return await this._configureStockRSIParams(stockSymbol, strategy);
+            default:
+                vscode.window.showWarningMessage(`暂不支持配置 ${strategyType} 类型的策略参数`);
+                return null;
+        }
+    }
+
+    private async _saveStockStrategyConfig(strategyName: string, stockSymbol: string, config: any) {
+        try {
+            // 获取当前策略信息
+            const strategies = this._store.getStrategies();
+            const strategy = strategies.find((s: any) => s.name === strategyName);
+            if (!strategy) {
+                throw new Error(`未找到策略: ${strategyName}`);
+            }
+
+            // 确保策略有stocks数组
+            if (!strategy.stocks) {
+                strategy.stocks = [];
+            }
+            
+            // 查找或创建股票配置
+            let stockConfig = strategy.stocks.find((stock: any) => stock.symbol === stockSymbol);
+            if (!stockConfig) {
+                stockConfig = {
+                    symbol: stockSymbol,
+                    enabled: true
+                };
+                strategy.stocks.push(stockConfig);
+            }
+            
+            // 保存配置参数
+            stockConfig.config = { ...stockConfig.config, ...config };
+            stockConfig.updatedAt = new Date().toISOString();
+            
+            // 保存更新后的策略
+            await this._store.setStrategies(strategies);
+            
+            console.log(`保存股票策略配置: ${strategyName}, 股票: ${stockSymbol}`, config);
+        } catch (error) {
+            console.error('保存股票策略配置失败:', error);
+            vscode.window.showErrorMessage('保存股票策略配置失败');
+        }
+    }
+
+    private async _configureStockMAPeriod(stockSymbol: string, strategy: any): Promise<any> {
+        const periods = [
+            { label: '5日均线', value: 5 },
+            { label: '10日均线', value: 10 },
+            { label: '20日均线', value: 20 },
+            { label: '30日均线', value: 30 },
+            { label: '60日均线', value: 60 }
+        ];
+
+        const selected = await vscode.window.showQuickPick(
+            periods.map(p => ({ label: p.label, description: `周期: ${p.value}` })),
+            { placeHolder: `为股票 ${stockSymbol} 选择均线周期` }
+        );
+
+        if (selected) {
+            const period = periods.find(p => p.label === selected.label);
+            return { type: 'ma', period: period?.value, stockSymbol };
+        }
+        return null;
+    }
+
+    private async _configureStockTimePeriod(stockSymbol: string, strategy: any): Promise<any> {
+        const periods = [
+            { label: '15分钟', value: '15m' },
+            { label: '60分钟', value: '60m' },
+            { label: '日线', value: '1d' },
+            { label: '周线', value: '1w' }
+        ];
+
+        const selected = await vscode.window.showQuickPick(
+            periods.map(p => ({ label: p.label })),
+            { placeHolder: `为股票 ${stockSymbol} 选择时间周期` }
+        );
+
+        if (selected) {
+            const period = periods.find(p => p.label === selected.label);
+            return { type: 'timeframe', period: period?.value, stockSymbol };
+        }
+        return null;
+    }
+
+    private async _configureStockKDJParams(stockSymbol: string, strategy: any): Promise<any> {
+        const kPeriod = await vscode.window.showInputBox({
+            prompt: `为股票 ${stockSymbol} 请输入K值周期`,
+            value: '9',
+            validateInput: (value) => {
+                const num = parseInt(value);
+                if (isNaN(num) || num <= 0) {
+                    return '请输入有效的正整数';
+                }
+                return null;
+            }
+        });
+
+        if (kPeriod) {
+            return { type: 'kdj', kPeriod: parseInt(kPeriod), dPeriod: 3, jPeriod: 3, stockSymbol };
+        }
+        return null;
+    }
+
+    private async _configureStockRSIParams(stockSymbol: string, strategy: any): Promise<any> {
+        const period = await vscode.window.showInputBox({
+            prompt: `为股票 ${stockSymbol} 请输入RSI周期`,
+            value: '14',
+            validateInput: (value) => {
+                const num = parseInt(value);
+                if (isNaN(num) || num <= 0) {
+                    return '请输入有效的正整数';
+                }
+                return null;
+            }
+        });
+
+        if (period) {
+            return { type: 'rsi', period: parseInt(period), stockSymbol };
+        }
+        return null;
+    }
+
+    private async _showPresetStrategyConfigDialog(presetStrategy: any, stockSymbol: string): Promise<any> {
+        const strategyName = presetStrategy.name;
+        const config: any = { strategyName, stockSymbol };
+
+        // 根据不同的预设策略显示不同的参数配置
+        switch (strategyName) {
+            case 'RSI超买超卖':
+                const rsiPeriod = await vscode.window.showInputBox({
+                    prompt: `为股票 ${stockSymbol} 配置RSI周期`,
+                    value: '14',
+                    validateInput: (value) => {
+                        const num = parseInt(value);
+                        if (isNaN(num) || num <= 0) {
+                            return '请输入有效的正整数';
+                        }
+                        return null;
+                    }
+                });
+                if (rsiPeriod) {
+                    config.rsiPeriod = parseInt(rsiPeriod);
+                    config.overbought = 70;
+                    config.oversold = 30;
+                }
+                break;
+
+            case 'MACD金叉死叉':
+                const fastPeriod = await vscode.window.showInputBox({
+                    prompt: `为股票 ${stockSymbol} 配置MACD快线周期`,
+                    value: '12',
+                    validateInput: (value) => {
+                        const num = parseInt(value);
+                        if (isNaN(num) || num <= 0) {
+                            return '请输入有效的正整数';
+                        }
+                        return null;
+                    }
+                });
+                if (fastPeriod) {
+                    config.fastPeriod = parseInt(fastPeriod);
+                    config.slowPeriod = 26;
+                    config.signalPeriod = 9;
+                }
+                break;
+
+            case '双均线策略':
+                const shortMA = await vscode.window.showInputBox({
+                    prompt: `为股票 ${stockSymbol} 配置短期均线周期`,
+                    value: '5',
+                    validateInput: (value) => {
+                        const num = parseInt(value);
+                        if (isNaN(num) || num <= 0) {
+                            return '请输入有效的正整数';
+                        }
+                        return null;
+                    }
+                });
+                if (shortMA) {
+                    config.shortMA = parseInt(shortMA);
+                    config.longMA = 20;
+                }
+                break;
+
+            case '布林带策略':
+                const bollPeriod = await vscode.window.showInputBox({
+                    prompt: `为股票 ${stockSymbol} 配置布林带周期`,
+                    value: '20',
+                    validateInput: (value) => {
+                        const num = parseInt(value);
+                        if (isNaN(num) || num <= 0) {
+                            return '请输入有效的正整数';
+                        }
+                        return null;
+                    }
+                });
+                if (bollPeriod) {
+                    config.period = parseInt(bollPeriod);
+                    config.stdDev = 2;
+                }
+                break;
+
+            case 'KDJ超买超卖':
+                const kdjPeriod = await vscode.window.showInputBox({
+                    prompt: `为股票 ${stockSymbol} 配置KDJ周期`,
+                    value: '9',
+                    validateInput: (value) => {
+                        const num = parseInt(value);
+                        if (isNaN(num) || num <= 0) {
+                            return '请输入有效的正整数';
+                        }
+                        return null;
+                    }
+                });
+                if (kdjPeriod) {
+                    config.kPeriod = parseInt(kdjPeriod);
+                    config.dPeriod = 3;
+                    config.jPeriod = 3;
+                }
+                break;
+
+            default:
+                // 对于其他策略，使用通用配置
+                config.period = 14;
+                break;
+        }
+
+        return Object.keys(config).length > 2 ? config : null;
+    }
+
+    private async _savePresetStrategyConfig(strategyId: string, stockSymbol: string, presetStrategy: string, config: any): Promise<void> {
+        try {
+            console.log(`保存预设策略配置: 策略ID=${strategyId}, 股票=${stockSymbol}, 预设策略=${presetStrategy}`, config);
+            
+            // 获取当前策略配置
+            const workspaceConfig = vscode.workspace.getConfiguration('watchstock');
+            const stockStrategies: { [key: string]: any } = workspaceConfig.get('stockStrategies', {});
+            
+            // 为股票创建策略配置键
+            const configKey = `${strategyId}_${stockSymbol}`;
+            stockStrategies[configKey] = {
+                strategyId,
+                stockSymbol,
+                presetStrategy,
+                config,
+                updatedAt: new Date().toISOString()
+            };
+            
+            // 保存到工作区配置
+            await workspaceConfig.update('stockStrategies', stockStrategies, vscode.ConfigurationTarget.Workspace);
+            
+            console.log(`预设策略配置已保存: ${configKey}`);
+        } catch (error) {
+            console.error('保存预设策略配置失败:', error);
+            throw error;
+        }
     }
 
     /**
@@ -350,7 +969,7 @@ export class StrategyDashboardPanel {
     }
 
     /**
-     * 获取面板数据
+     * 获取面板数据 - 扁平化结构
      */
     private async _getDashboardData(): Promise<StrategyDashboardData> {
         const rawStrategies = this._store.getStrategies();
@@ -366,68 +985,82 @@ export class StrategyDashboardPanel {
             };
         });
         
+        // 构建股票名称映射
+        const stockNames: Record<string, string> = {};
+        [...watchlist, ...holdings].forEach(stock => {
+            if (stock.name) {
+                stockNames[stock.symbol] = stock.name;
+            }
+        });
+        
         // 获取性能统计数据
         const performanceStats = this._calculateStrategyPerformance();
         
-        // 转换策略数据
-        const strategies: StrategyWithStats[] = rawStrategies.map((strategy: any) => {
+        // 生成扁平化的股票-策略组合数据
+        const stockStrategies: StockStrategyItem[] = [];
+        
+        rawStrategies.forEach((strategy: any) => {
             const strategySignals = this._signalHistory.filter(s => s.strategyName === strategy.name);
             const buySignals = strategySignals.filter(s => s.signalType === 'buy').length;
             const sellSignals = strategySignals.filter(s => s.signalType === 'sell').length;
             
             // 获取该策略的性能统计
-            const performance = performanceStats.find(p => p.strategyName === strategy.name);
+            const performance = performanceStats.find(p => p.strategyName === strategy.name) || {
+                strategyName: strategy.name,
+                totalSignals: 0,
+                buySignals: 0,
+                sellSignals: 0,
+                avgSignalInterval: 0,
+                lastSignalTime: 0,
+                recentActivity: 'low' as const
+            };
             
             // 判断策略是否活跃
             const isActive = strategy.type === 'script' 
                 ? (strategy.script?.enabled || false)
                 : (strategy.signals?.buyConditions?.enabled || strategy.signals?.sellConditions?.enabled || false);
             
-            return {
-                id: strategy.name, // 使用策略名称作为ID
-                name: strategy.name,
-                type: strategy.type,
-                stocks: strategy.symbols.map((symbol: string) => {
-                    const stockData = stockPrices[symbol];
-                    const stockSignals = strategySignals
-                        .filter(s => s.symbol === symbol)
-                        .slice(0, 3) // 最近3个信号
-                        .map(s => s.signalType === 'buy' ? '🟢' : '🔴');
-                    
-                    return {
-                        symbol,
-                        price: stockData?.price,
-                        change: stockData?.change,
-                        changePercent: stockData ? stockData.change * 100 : undefined,
-                        signals: stockSignals
-                    };
-                }),
-                stats: {
-                    isActive,
-                    totalSignals: strategySignals.length,
-                    buySignals,
-                    sellSignals,
-                    lastSignalTime: strategySignals.length > 0 
-                        ? Math.max(...strategySignals.map(s => s.timestamp))
-                        : undefined
-                },
-                performance: performance || {
+            // 为每个股票创建一个股票-策略组合条目
+            strategy.symbols.forEach((symbol: string) => {
+                const stockData = stockPrices[symbol];
+                const stockSignals = strategySignals
+                    .filter(s => s.symbol === symbol)
+                    .slice(0, 3) // 最近3个信号
+                    .map(s => s.signalType === 'buy' ? '🟢' : '🔴');
+                
+                const stockName = stockNames[symbol] || symbol; // 如果没有名称则使用代码
+                
+                stockStrategies.push({
+                    id: `${symbol}_${strategy.name}`, // 唯一标识
+                    stockSymbol: symbol,
+                    stockName: stockName,
+                    strategyId: strategy.name,
                     strategyName: strategy.name,
-                    totalSignals: 0,
-                    buySignals: 0,
-                    sellSignals: 0,
-                    avgSignalInterval: 0,
-                    lastSignalTime: 0,
-                    recentActivity: 'low' as const
-                }
-            };
+                    strategyType: strategy.type || 'simple',
+                    price: stockData?.price,
+                    change: stockData?.change,
+                    changePercent: stockData ? stockData.change * 100 : undefined,
+                    signals: stockSignals,
+                    lastUpdate: new Date().toLocaleString('zh-CN'),
+                    isActive: isActive,
+                    stats: {
+                        totalSignals: strategySignals.filter(s => s.symbol === symbol).length,
+                        buySignals: strategySignals.filter(s => s.symbol === symbol && s.signalType === 'buy').length,
+                        sellSignals: strategySignals.filter(s => s.symbol === symbol && s.signalType === 'sell').length,
+                        lastSignalTime: strategySignals.filter(s => s.symbol === symbol).length > 0 
+                            ? Math.max(...strategySignals.filter(s => s.symbol === symbol).map(s => s.timestamp))
+                            : undefined
+                    },
+                    performance: performance
+                });
+            });
         });
         
         return {
-            strategies,
+            stockStrategies,
             lastUpdate: new Date().toLocaleString('zh-CN'),
             totalSignals: this._signalHistory.length,
-            activeStrategies: strategies.filter(s => s.stats.isActive).length
+            activeStrategies: stockStrategies.filter(s => s.isActive).length
         };
     }
 
@@ -469,14 +1102,16 @@ export class StrategyDashboardPanel {
             <div class="header-actions">
                 <button class="btn btn-primary" onclick="refreshData()">🔄 刷新</button>
                 <button class="btn btn-secondary" onclick="clearHistory()">🗑️ 清空历史</button>
+                <button class="btn btn-success" onclick="createPineScript()">📝 创建Pine脚本</button>
+                <button class="btn btn-info" onclick="managePineScripts()">⚙️ 管理Pine脚本</button>
             </div>
         </header>
 
         <main class="dashboard-main">
             <div class="strategies-section">
-                <h2>策略列表</h2>
-                <div class="strategies-grid" id="strategiesGrid">
-                    ${this._generateStrategiesHtml(data.strategies)}
+                <h2>股票策略监控</h2>
+                <div class="stock-strategies-list" id="stockStrategiesList">
+                    ${this._generateStockStrategiesHtml(data.stockStrategies)}
                 </div>
             </div>
 
@@ -497,53 +1132,87 @@ export class StrategyDashboardPanel {
     }
 
     /**
-     * 生成策略HTML
+     * 生成扁平化股票策略HTML
      */
-    private _generateStrategiesHtml(strategies: StrategyWithStats[]): string {
-        if (strategies.length === 0) {
-            return '<div class="empty-state">暂无策略数据</div>';
+    private _generateStockStrategiesHtml(stockStrategies: StockStrategyItem[]): string {
+        if (stockStrategies.length === 0) {
+            return '<div class="empty-state">暂无股票策略数据</div>';
         }
 
-        return strategies.map(strategy => `
-            <div class="strategy-card ${strategy.stats.isActive ? 'active' : 'inactive'}">
-                <div class="strategy-header">
-                    <h3>${strategy.name}</h3>
-                    <div class="strategy-toggle">
+        return stockStrategies.map(item => `
+            <div class="stock-strategy-row ${item.isActive ? 'active' : 'inactive'}">
+                <div class="stock-info-section">
+                    <div class="stock-name-code">
+                        <span class="stock-name">${item.stockName}</span>
+                        <span class="stock-code">${item.stockSymbol}</span>
+                    </div>
+                    <div class="strategy-name">
+                        <span class="strategy-label">${item.strategyName}</span>
+                        <span class="strategy-type">(${this._getStrategyTypeLabel(item.strategyType)})</span>
+                    </div>
+                </div>
+                
+                <div class="price-info-section">
+                    <div class="stock-price">¥${item.price?.toFixed(2) || '--'}</div>
+                    <div class="stock-change ${(item.change || 0) >= 0 ? 'positive' : 'negative'}">
+                        ${(item.change || 0) >= 0 ? '↗' : '↘'} ${Math.abs(item.changePercent || 0).toFixed(2)}%
+                    </div>
+                </div>
+                
+                <div class="signals-section">
+                    <div class="recent-signals">${item.signals.join(' ')}</div>
+                    <div class="signal-stats">
+                        <span class="signal-count">信号: ${item.stats.totalSignals}</span>
+                        <span class="buy-sell-ratio">${item.stats.buySignals}买/${item.stats.sellSignals}卖</span>
+                    </div>
+                </div>
+                
+                <div class="controls-section">
+                    <div class="strategy-controls">
+                        <select class="strategy-select" onchange="changeStockStrategy('${item.id}', this.value)" title="更换策略">
+                            <option value="${item.strategyType}" selected>${this._getStrategyTypeLabel(item.strategyType)}</option>
+                            <option value="rsi_oversold_overbought">RSI超买超卖</option>
+                            <option value="macd_golden_cross">MACD金叉死叉</option>
+                            <option value="double_ma_cross">双均线策略</option>
+                            <option value="bollinger_bands">布林带策略</option>
+                            <option value="kdj_oversold_overbought">KDJ超买超卖</option>
+                            <option value="price_volume_breakout">价量突破</option>
+                            <option value="mean_reversion">均值回归</option>
+                            <option value="momentum_strategy">动量策略</option>
+                        </select>
+                        <button class="btn-config" onclick="configureStockStrategy('${item.id}')" title="配置策略参数">
+                            ⚙️
+                        </button>
+                    </div>
+                    <div class="status-toggle">
                         <label class="switch">
-                            <input type="checkbox" ${strategy.stats.isActive ? 'checked' : ''} 
-                                   onchange="toggleStrategy('${strategy.id}')">
+                            <input type="checkbox" ${item.isActive ? 'checked' : ''} 
+                                   onchange="toggleStockStrategy('${item.id}')">
                             <span class="slider"></span>
                         </label>
                     </div>
                 </div>
-                <div class="strategy-stats">
-                    <div class="stat">总信号: ${strategy.stats.totalSignals}</div>
-                    <div class="stat">买入: ${strategy.stats.buySignals}</div>
-                    <div class="stat">卖出: ${strategy.stats.sellSignals}</div>
-                </div>
-                <div class="strategy-performance">
-                    <span class="perf-item activity-${strategy.performance.recentActivity}">
-                        活跃度: ${strategy.performance.recentActivity === 'high' ? '高' : strategy.performance.recentActivity === 'medium' ? '中' : '低'}
-                    </span>
-                    ${strategy.performance.avgSignalInterval > 0 ? 
-                        `<span class="perf-item">平均间隔: ${strategy.performance.avgSignalInterval}分钟</span>` : 
-                        '<span class="perf-item">平均间隔: 暂无数据</span>'
-                    }
-                </div>
-                <div class="strategy-stocks">
-                    ${strategy.stocks.map(stock => `
-                        <div class="stock-item">
-                            <span class="stock-symbol">${stock.symbol}</span>
-                            <span class="stock-price">¥${stock.price?.toFixed(2) || '--'}</span>
-                            <span class="stock-change ${(stock.change || 0) >= 0 ? 'positive' : 'negative'}">
-                                ${stock.changePercent?.toFixed(2) || '--'}%
-                            </span>
-                            <span class="stock-signals">${stock.signals.join(' ')}</span>
-                        </div>
-                    `).join('')}
-                </div>
             </div>
         `).join('');
+    }
+    
+    /**
+     * 获取策略类型标签
+     */
+    private _getStrategyTypeLabel(strategyType: string): string {
+        const labels: Record<string, string> = {
+            'rsi_oversold_overbought': 'RSI超买超卖',
+            'macd_golden_cross': 'MACD金叉死叉',
+            'double_ma_cross': '双均线策略',
+            'bollinger_bands': '布林带策略',
+            'kdj_oversold_overbought': 'KDJ超买超卖',
+            'price_volume_breakout': '价量突破',
+            'mean_reversion': '均值回归',
+            'momentum_strategy': '动量策略',
+            'simple': '简单策略',
+            'script': '脚本策略'
+        };
+        return labels[strategyType] || strategyType;
     }
 
     /**
@@ -661,6 +1330,24 @@ export class StrategyDashboardPanel {
                 background-color: var(--vscode-button-secondaryHoverBackground);
             }
 
+            .btn-success {
+                background-color: #28a745;
+                color: white;
+            }
+
+            .btn-success:hover {
+                background-color: #218838;
+            }
+
+            .btn-info {
+                background-color: #17a2b8;
+                color: white;
+            }
+
+            .btn-info:hover {
+                background-color: #138496;
+            }
+
             .dashboard-main {
                 display: grid;
                 grid-template-columns: 2fr 1fr;
@@ -674,38 +1361,128 @@ export class StrategyDashboardPanel {
                 color: var(--vscode-editor-foreground);
             }
 
-            .strategies-grid {
-                display: grid;
-                grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
-                gap: 20px;
-            }
-
-            .strategy-card {
+            .stock-strategies-list {
                 background-color: var(--vscode-panel-background);
                 border: 1px solid var(--vscode-panel-border);
                 border-radius: 8px;
-                padding: 20px;
-                transition: all 0.2s;
+                overflow: hidden;
             }
 
-            .strategy-card.active {
-                border-color: var(--vscode-textLink-foreground);
+            .stock-strategy-item {
+                display: grid;
+                grid-template-columns: 2fr 1fr 1fr 1fr 1fr 120px 80px;
+                gap: 15px;
+                padding: 12px 16px;
+                border-bottom: 1px solid var(--vscode-panel-border);
+                align-items: center;
+                font-size: 13px;
+                transition: background-color 0.2s;
             }
 
-            .strategy-card.inactive {
+            .stock-strategy-item:last-child {
+                border-bottom: none;
+            }
+
+            .stock-strategy-item:hover {
+                background-color: var(--vscode-list-hoverBackground);
+            }
+
+            .stock-strategy-item.inactive {
                 opacity: 0.6;
             }
 
-            .strategy-header {
-                display: flex;
-                justify-content: space-between;
-                align-items: center;
-                margin-bottom: 15px;
+            .stock-strategy-header {
+                display: grid;
+                grid-template-columns: 2fr 1fr 1fr 1fr 1fr 120px 80px;
+                gap: 15px;
+                padding: 12px 16px;
+                background-color: var(--vscode-editor-background);
+                border-bottom: 2px solid var(--vscode-panel-border);
+                font-weight: 600;
+                font-size: 12px;
+                color: var(--vscode-descriptionForeground);
             }
 
-            .strategy-header h3 {
-                font-size: 16px;
-                font-weight: 600;
+            .btn-config {
+                background: var(--vscode-button-background);
+                color: var(--vscode-button-foreground);
+                border: none;
+                border-radius: 4px;
+                padding: 4px 8px;
+                cursor: pointer;
+                font-size: 12px;
+                transition: background-color 0.2s;
+            }
+
+            .stock-strategy-controls {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                margin: 4px 0;
+            }
+
+            .strategy-select {
+                background: var(--vscode-input-background);
+                color: var(--vscode-input-foreground);
+                border: 1px solid var(--vscode-input-border);
+                border-radius: 4px;
+                padding: 4px 8px;
+                font-size: 12px;
+                cursor: pointer;
+                min-width: 120px;
+                transition: border-color 0.2s;
+            }
+
+            .strategy-select:hover {
+                border-color: var(--vscode-inputOption-hoverBackground);
+            }
+
+            .strategy-select:focus {
+                outline: none;
+                border-color: var(--vscode-focusBorder);
+                box-shadow: 0 0 0 1px var(--vscode-focusBorder);
+            }
+
+            .btn-stock-config {
+                background: var(--vscode-button-secondaryBackground);
+                color: var(--vscode-button-secondaryForeground);
+                border: none;
+                border-radius: 4px;
+                padding: 4px 8px;
+                cursor: pointer;
+                font-size: 12px;
+                transition: background-color 0.2s;
+                min-width: 28px;
+                height: 28px;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+            }
+
+            .btn-stock-config:hover {
+                background: var(--vscode-button-secondaryHoverBackground);
+            }
+
+            .btn-config:hover {
+                background: var(--vscode-button-hoverBackground);
+            }
+
+            .btn-stock-config {
+                background: var(--vscode-button-background);
+                color: var(--vscode-button-foreground);
+                border: none;
+                border-radius: 3px;
+                padding: 2px 6px;
+                cursor: pointer;
+                font-size: 10px;
+                margin-left: 8px;
+                transition: background-color 0.2s;
+                opacity: 0.8;
+            }
+
+            .btn-stock-config:hover {
+                background: var(--vscode-button-hoverBackground);
+                opacity: 1;
             }
 
             .switch {
@@ -790,51 +1567,84 @@ export class StrategyDashboardPanel {
                 color: white !important;
             }
 
-            .strategy-stocks {
-                border-top: 1px solid var(--vscode-panel-border);
-                padding-top: 15px;
-            }
-
-            .stock-item {
-                display: flex;
-                justify-content: space-between;
-                align-items: center;
-                padding: 8px 0;
-                border-bottom: 1px solid var(--vscode-panel-border);
-                font-size: 14px;
-            }
-
-            .stock-item:last-child {
-                border-bottom: none;
-            }
-
-            .stock-symbol {
+            .stock-name {
                 font-weight: 600;
-                min-width: 80px;
+                color: var(--vscode-editor-foreground);
+            }
+
+            .stock-code {
+                color: var(--vscode-descriptionForeground);
+                font-size: 11px;
+                margin-top: 2px;
+            }
+
+            .strategy-name {
+                font-weight: 500;
+                color: var(--vscode-textLink-foreground);
+            }
+
+            .strategy-type {
+                font-size: 11px;
+                color: var(--vscode-descriptionForeground);
+                margin-top: 2px;
             }
 
             .stock-price {
-                min-width: 80px;
+                font-weight: 600;
+                font-size: 13px;
                 text-align: right;
             }
 
             .stock-change {
-                min-width: 60px;
-                text-align: right;
                 font-weight: 600;
+                font-size: 12px;
+                padding: 2px 6px;
+                border-radius: 4px;
+                text-align: center;
             }
 
             .stock-change.positive {
-                color: #f14c4c;
+                color: #ffffff;
+                background-color: #4CAF50;
             }
 
             .stock-change.negative {
-                color: #73c991;
+                color: #ffffff;
+                background-color: #F44336;
             }
 
-            .stock-signals {
-                min-width: 80px;
-                text-align: right;
+            .stock-change.neutral {
+                color: var(--vscode-editor-foreground);
+                background-color: var(--vscode-input-background);
+            }
+
+            .signal-status {
+                font-size: 11px;
+                padding: 2px 6px;
+                border-radius: 3px;
+                text-align: center;
+                font-weight: 500;
+            }
+
+            .signal-status.buy {
+                background-color: #4CAF50;
+                color: white;
+            }
+
+            .signal-status.sell {
+                background-color: #F44336;
+                color: white;
+            }
+
+            .signal-status.hold {
+                background-color: var(--vscode-input-background);
+                color: var(--vscode-editor-foreground);
+            }
+
+            .stock-strategy-controls {
+                display: flex;
+                align-items: center;
+                gap: 8px;
             }
 
             .signals-list {
@@ -911,8 +1721,13 @@ export class StrategyDashboardPanel {
                     gap: 15px;
                 }
                 
-                .strategies-grid {
+                .stock-strategy-item {
                     grid-template-columns: 1fr;
+                    gap: 8px;
+                }
+                
+                .stock-strategy-header {
+                    display: none;
                 }
             }
         `;
@@ -929,9 +1744,10 @@ export class StrategyDashboardPanel {
                 vscode.postMessage({ command: 'refresh' });
             }
 
-            function toggleStrategy(strategyId) {
+            function toggleStockStrategy(stockSymbol, strategyId) {
                 vscode.postMessage({ 
-                    command: 'toggleStrategy', 
+                    command: 'toggleStockStrategy', 
+                    stockSymbol: stockSymbol,
                     strategyId: strategyId 
                 });
             }
@@ -940,6 +1756,53 @@ export class StrategyDashboardPanel {
                 if (confirm('确定要清空所有信号历史记录吗？')) {
                     vscode.postMessage({ command: 'clearHistory' });
                 }
+            }
+
+            function configureStockStrategy(stockSymbol, strategyId) {
+                vscode.postMessage({ 
+                    command: 'configureStockStrategy', 
+                    stockSymbol: stockSymbol,
+                    strategyId: strategyId
+                });
+            }
+
+            function onStrategySelect(stockSymbol, currentStrategyId, selectedStrategyType) {
+                if (selectedStrategyType === '') return;
+                
+                // 发送消息给扩展，更换策略类型
+                vscode.postMessage({
+                    command: 'changeStockStrategy',
+                    stockSymbol: stockSymbol,
+                    currentStrategyId: currentStrategyId,
+                    newStrategyType: selectedStrategyType
+                });
+            }
+
+            function createPineScript() {
+                vscode.postMessage({ command: 'createPineScript' });
+            }
+
+            function managePineScripts() {
+                vscode.postMessage({ command: 'managePineScripts' });
+            }
+
+            function configurePineScript(scriptName) {
+                vscode.postMessage({ 
+                    command: 'configurePineScript',
+                    scriptName: scriptName
+                });
+            }
+
+            // 获取可用的策略类型列表
+            function getAvailableStrategies() {
+                return [
+                    { value: 'ma_cross', label: '均线交叉' },
+                    { value: 'rsi_oversold', label: 'RSI超卖' },
+                    { value: 'bollinger_bands', label: '布林带' },
+                    { value: 'macd_signal', label: 'MACD信号' },
+                    { value: 'volume_breakout', label: '成交量突破' },
+                    { value: 'support_resistance', label: '支撑阻力' }
+                ];
             }
 
             // 自动刷新提示
