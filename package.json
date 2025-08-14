@@ -1,0 +1,137 @@
+{
+  "name": "efinance-stocks",
+  "displayName": "EFinance Stocks",
+  "description": "一个类似 LeekFund 的股票监控扩展：自选股、持仓股、策略监听",
+  "version": "0.0.2",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "*"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "EFinance Stocks",
+      "properties": {
+        "efinance.refreshInterval": {
+          "type": "number",
+          "default": 60,
+          "minimum": 5,
+          "maximum": 300,
+          "description": "股票数据刷新间隔（秒）"
+        },
+        "efinance.autoRefresh": {
+          "type": "boolean",
+          "default": true,
+          "description": "是否自动刷新股票数据"
+        },
+        "efinance.showInExplorer": {
+          "type": "boolean",
+          "default": true,
+          "description": "是否在资源管理器中显示 EFinance Stocks 视图（自选股/持仓股/策略监听）"
+        }
+      }
+    },
+    "views": {
+      "explorer": [
+        {
+          "id": "efinance.watchlist",
+          "name": "自选股",
+          "when": "config.efinance.showInExplorer"
+        },
+        {
+          "id": "efinance.holdings",
+          "name": "持仓股",
+          "when": "config.efinance.showInExplorer"
+        },
+        {
+          "id": "efinance.strategies",
+          "name": "策略监听",
+          "when": "config.efinance.showInExplorer"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "efinance.addWatchStock",
+        "title": "添加自选股"
+      },
+      {
+        "command": "efinance.addHoldingStock",
+        "title": "添加持仓股"
+      },
+      {
+        "command": "efinance.addStrategy",
+        "title": "创建策略"
+      },
+      {
+        "command": "efinance.refreshAll",
+        "title": "刷新股票数据"
+      },
+      {
+        "command": "efinance.removeItem",
+        "title": "删除项目"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "efinance.addWatchStock",
+          "when": "view == efinance.watchlist",
+          "group": "navigation"
+        },
+        {
+          "command": "efinance.addHoldingStock",
+          "when": "view == efinance.holdings",
+          "group": "navigation"
+        },
+        {
+          "command": "efinance.addStrategy",
+          "when": "view == efinance.strategies",
+          "group": "navigation"
+        },
+        {
+          "command": "efinance.refreshAll",
+          "when": "view == efinance.watchlist || view == efinance.holdings || view == efinance.strategies",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "efinance.removeItem",
+          "when": "view == efinance.watchlist && viewItem == efinance.watchItem",
+          "group": "inline"
+        },
+        {
+          "command": "efinance.removeItem",
+          "when": "view == efinance.holdings && viewItem == efinance.holdingItem",
+          "group": "inline"
+        },
+        {
+          "command": "efinance.removeItem",
+          "when": "view == efinance.strategies && viewItem == efinance.strategyItem",
+          "group": "inline"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^18.19.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.4.0"
+  },
+  "dependencies": {
+    "@types/node-fetch": "^2.6.13",
+    "node-fetch": "^3.3.2"
+  }
+}

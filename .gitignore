@@ -1,0 +1,42 @@
+﻿# Dependencies
+node_modules/
+
+# Build output
+out/
+dist/
+build/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+logs
+*.log
+
+# Env
+.env
+.env.*.local
+
+# IDE
+.vscode/*
+!.vscode/extensions.json
+!.vscode/launch.json
+!.vscode/tasks.json
+.idea/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Coverage
+coverage/
+.nyc_output/
+
+# VS Code extension package
+*.vsix
+
+# TypeScript
+*.tsbuildinfo
