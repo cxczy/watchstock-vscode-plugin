@@ -17,6 +17,35 @@ type Strategy = {
     id: string;
     name: string;
     symbols: string[]; // 关注的股票代码
+    
+    // 策略类型：'simple' 为简单阈值策略，'script' 为Pine脚本策略
+    type?: 'simple' | 'script';
+    
+    // Pine脚本配置（新增）
+    script?: {
+        buyScript?: string;         // 买入信号Pine脚本
+        sellScript?: string;        // 卖出信号Pine脚本
+        enabled: boolean;           // 是否启用脚本策略
+        template?: string;          // 使用的策略模板名称
+    };
+    
+    // 传统买卖信号配置（保持向后兼容）
+    signals?: {
+        buyConditions?: {
+            priceThreshold?: number;    // 买入价格阈值
+            changeThreshold?: number;   // 买入涨跌幅阈值（如-0.05表示跌5%时买入）
+            enabled: boolean;           // 是否启用买入信号
+        };
+        sellConditions?: {
+            priceThreshold?: number;    // 卖出价格阈值
+            changeThreshold?: number;   // 卖出涨跌幅阈值（如0.10表示涨10%时卖出）
+            enabled: boolean;           // 是否启用卖出信号
+        };
+        notifications?: {
+            showPopup: boolean;         // 是否显示弹窗提醒
+            playSound: boolean;         // 是否播放提示音
+        };
+    };
 };
 
 class Store {
@@ -53,7 +82,7 @@ class StockTreeItem extends vscode.TreeItem {
         public readonly label: string,
         public readonly collapsibleState: vscode.TreeItemCollapsibleState,
         public readonly options: {
-            contextValue: 'efinance.watchItem' | 'efinance.holdingItem' | 'efinance.strategyItem';
+            contextValue: 'efinance.watchItem' | 'efinance.holdingItem' | 'efinance.strategyItem' | 'efinance.strategyStockItem';
             description?: string;
             tooltip?: string;
         }
@@ -143,7 +172,7 @@ class HoldingsProvider extends BaseProvider<Holding> {
 }
 
 class StrategiesProvider extends BaseProvider<Strategy> {
-    getChildren(element?: StockTreeItem): Promise<StockTreeItem[]> {
+    async getChildren(element?: StockTreeItem): Promise<StockTreeItem[]> {
         const list = this.store.getStrategies();
         if (!element) {
             return Promise.resolve(
@@ -160,16 +189,153 @@ class StrategiesProvider extends BaseProvider<Strategy> {
         } else {
             const strategy = list.find(s => s.name === element.label);
             if (!strategy) return Promise.resolve([]);
+            
+            // 获取股票行情数据
+            const quotes = await fetchQuotes(strategy.symbols, 'strategy-view');
+            
             return Promise.resolve(
-                strategy.symbols.map(sym => new StockTreeItem(
-                    sym,
-                    vscode.TreeItemCollapsibleState.None,
-                    {
-                        contextValue: 'efinance.watchItem'
+                strategy.symbols.map(sym => {
+                    const quote = quotes[sym];
+                    let description = '';
+                    let signalStatus = '';
+                    let tooltip = `股票: ${sym}`;
+                    
+                    if (quote) {
+                        const changePercent = (quote.change * 100).toFixed(2);
+                        const changeColor = quote.change >= 0 ? '📈' : '📉';
+                        description = `¥${quote.price.toFixed(2)} ${changeColor}${changePercent}%`;
+                        tooltip += `\n当前价: ¥${quote.price.toFixed(2)}\n涨跌幅: ${changePercent}%`;
+                        
+                        // 检查买卖信号
+                        if (strategy.signals || (strategy.type === 'script' && strategy.script?.enabled)) {
+                            const signals = this.checkSignals(quote, strategy);
+                            if (signals.length > 0) {
+                                signalStatus = ` ${signals.join(' ')}`;
+                                tooltip += `\n信号: ${signals.join(', ')}`;
+                            }
+                        }
+                    } else {
+                        description = '数据获取中...';
                     }
-                ))
+                    
+                    return new StockTreeItem(
+                        sym + signalStatus,
+                        vscode.TreeItemCollapsibleState.None,
+                        {
+                            contextValue: 'efinance.strategyStockItem',
+                            description: description,
+                            tooltip: tooltip
+                        }
+                    );
+                })
             );
         }
+    }
+    
+    // 检查买卖信号（支持Pine脚本和传统阈值策略）
+    private checkSignals(quote: { price: number; change: number }, strategy: Strategy): string[] {
+        const result: string[] = [];
+        
+        // 优先使用Pine脚本策略
+        if (strategy.type === 'script' && strategy.script?.enabled) {
+            return this.checkScriptSignals(quote, strategy);
+        }
+        
+        // 传统阈值策略（向后兼容）
+        const signals = strategy.signals;
+        if (!signals) return result;
+        
+        // 检查买入信号
+        if (signals.buyConditions?.enabled) {
+            let buySignal = false;
+            
+            // 价格阈值检查
+            if (signals.buyConditions.priceThreshold !== undefined && 
+                quote.price <= signals.buyConditions.priceThreshold) {
+                buySignal = true;
+            }
+            
+            // 涨跌幅阈值检查
+            if (signals.buyConditions.changeThreshold !== undefined && 
+                quote.change <= signals.buyConditions.changeThreshold / 100) {
+                buySignal = true;
+            }
+            
+            if (buySignal) {
+                result.push('🟢买入');
+            }
+        }
+        
+        // 检查卖出信号
+        if (signals.sellConditions?.enabled) {
+            let sellSignal = false;
+            
+            // 价格阈值检查
+            if (signals.sellConditions.priceThreshold !== undefined && 
+                quote.price >= signals.sellConditions.priceThreshold) {
+                sellSignal = true;
+            }
+            
+            // 涨跌幅阈值检查
+            if (signals.sellConditions.changeThreshold !== undefined && 
+                quote.change >= signals.sellConditions.changeThreshold / 100) {
+                sellSignal = true;
+            }
+            
+            if (sellSignal) {
+                result.push('🔴卖出');
+            }
+        }
+        
+        return result;
+    }
+    
+    // Pine脚本信号检查
+    private checkScriptSignals(quote: { price: number; change: number }, strategy: Strategy): string[] {
+        const result: string[] = [];
+        
+        if (!strategy.script) return result;
+        
+        try {
+            // 导入Pine脚本解析器
+            const { PineScriptParser } = require('./scriptParser');
+            
+            // 创建脚本执行上下文
+            const context = {
+                symbol: '', // 在调用时会设置具体的股票代码
+                price: quote.price,
+                change: quote.change,
+                changePercent: quote.change * 100,
+                // 历史价格数据（暂时使用当前价格模拟）
+                historicalPrices: Array(20).fill(quote.price),
+                indicatorCache: new Map()
+            };
+            
+            const parser = new PineScriptParser(context);
+            
+            // 检查买入脚本
+            if (strategy.script.buyScript) {
+                const buyResult = parser.execute(strategy.script.buyScript);
+                if (buyResult.success && buyResult.value) {
+                    result.push('🟢买入');
+                }
+            }
+            
+            // 检查卖出脚本
+            if (strategy.script.sellScript) {
+                const sellResult = parser.execute(strategy.script.sellScript);
+                if (sellResult.success && sellResult.value) {
+                    result.push('🔴卖出');
+                }
+            }
+            
+        } catch (error) {
+            console.error('[Pine脚本] 执行错误:', error);
+            // 脚本执行失败时，回退到传统策略
+            return this.checkSignals(quote, { ...strategy, type: 'simple' });
+        }
+        
+        return result;
     }
 }
 
@@ -407,10 +573,353 @@ export function activate(context: vscode.ExtensionContext) {
             strategies.push({
                 id: `${Date.now()}`,
                 name,
-                symbols
+                symbols,
+                signals: {
+                    buyConditions: { enabled: false },
+                    sellConditions: { enabled: false },
+                    notifications: { showPopup: true, playSound: false }
+                }
             });
             await store.setStrategies(strategies);
             strategyProvider.refresh();
+        })
+    );
+
+    // 添加股票到策略
+    context.subscriptions.push(
+        vscode.commands.registerCommand('efinance.addStockToStrategy', async () => {
+            const strategies = store.getStrategies();
+            if (strategies.length === 0) {
+                vscode.window.showInformationMessage('请先创建策略');
+                return;
+            }
+
+            // 选择策略
+            const strategyItems = strategies.map(s => ({
+                label: s.name,
+                description: `${s.symbols.length} 支股票`,
+                strategy: s
+            }));
+            const selectedStrategy = await vscode.window.showQuickPick(strategyItems, {
+                placeHolder: '选择要添加股票的策略'
+            });
+            if (!selectedStrategy) return;
+
+            // 输入股票代码
+            const symbol = await vscode.window.showInputBox({ 
+                prompt: '输入股票代码（例如：600519 或 000001）',
+                validateInput: (value) => {
+                    if (!value || !value.trim()) {
+                        return '请输入股票代码';
+                    }
+                    if (selectedStrategy.strategy.symbols.includes(value.trim())) {
+                        return '该股票已在策略中';
+                    }
+                    return null;
+                }
+            });
+            if (!symbol) return;
+
+            // 更新策略
+            const updatedStrategies = strategies.map(s => {
+                if (s.id === selectedStrategy.strategy.id) {
+                    return {
+                        ...s,
+                        symbols: [...s.symbols, symbol.trim()]
+                    };
+                }
+                return s;
+            });
+            
+            await store.setStrategies(updatedStrategies);
+            strategyProvider.refresh();
+            vscode.window.showInformationMessage(`已将 ${symbol} 添加到策略 "${selectedStrategy.strategy.name}"`);
+        })
+    );
+
+    // 创建Pine脚本策略
+    context.subscriptions.push(
+        vscode.commands.registerCommand('efinance.addScriptStrategy', async () => {
+            const name = await vscode.window.showInputBox({ prompt: '输入Pine脚本策略名称' });
+            if (!name) return;
+            
+            const symbolsStr = await vscode.window.showInputBox({ prompt: '输入股票代码，使用逗号分隔（如：600519,000001）' });
+            const symbols = (symbolsStr || '')
+                .split(',')
+                .map(s => s.trim())
+                .filter(Boolean);
+            
+            const strategies = store.getStrategies();
+            strategies.push({
+                id: `${Date.now()}`,
+                name,
+                symbols,
+                type: 'script',
+                script: {
+                    enabled: true,
+                    buyScript: '',
+                    sellScript: '',
+                    template: 'custom'
+                }
+            });
+            await store.setStrategies(strategies);
+            strategyProvider.refresh();
+            vscode.window.showInformationMessage(`Pine脚本策略 "${name}" 已创建，请配置脚本内容`);
+        })
+    );
+    
+    // 配置Pine脚本策略内容
+    context.subscriptions.push(
+        vscode.commands.registerCommand('efinance.configureScriptStrategy', async (item?: StockTreeItem) => {
+            let targetStrategy: Strategy | undefined;
+            
+            if (item && item.contextValue === 'efinance.strategyItem') {
+                // 从右键菜单调用
+                const strategies = store.getStrategies();
+                targetStrategy = strategies.find(s => s.name === item.label);
+            } else {
+                // 从命令面板调用
+                const strategies = store.getStrategies().filter(s => s.type === 'script');
+                if (strategies.length === 0) {
+                    vscode.window.showInformationMessage('请先创建Pine脚本策略');
+                    return;
+                }
+                const strategyItems = strategies.map(s => ({
+                    label: s.name,
+                    description: `${s.symbols.length} 支股票 - Pine脚本策略`,
+                    strategy: s
+                }));
+                const selected = await vscode.window.showQuickPick(strategyItems, {
+                    placeHolder: '选择要配置的Pine脚本策略'
+                });
+                if (!selected) return;
+                targetStrategy = selected.strategy;
+            }
+            
+            if (!targetStrategy || targetStrategy.type !== 'script') {
+                vscode.window.showErrorMessage('请选择Pine脚本策略');
+                return;
+            }
+            
+            // 选择配置类型
+            const configType = await vscode.window.showQuickPick([
+                { label: '使用预设模板', value: 'template' },
+                { label: '自定义脚本', value: 'custom' },
+                { label: '启用/禁用策略', value: 'toggle' }
+            ], { placeHolder: '选择配置方式' });
+            
+            if (!configType) return;
+            
+            const strategies = store.getStrategies();
+            let updatedStrategies = [...strategies];
+            
+            if (configType.value === 'template') {
+                // 选择预设模板
+                const { getPresetStrategies } = require('./scriptParser');
+                const presets = getPresetStrategies();
+                const templateItems = Object.entries(presets).map(([key, preset]: [string, any]) => ({
+                    label: preset.name,
+                    description: preset.description,
+                    value: key
+                }));
+                
+                const selectedTemplate = await vscode.window.showQuickPick(templateItems, {
+                    placeHolder: '选择预设策略模板'
+                });
+                
+                if (selectedTemplate) {
+                    const preset = presets[selectedTemplate.value];
+                    updatedStrategies = strategies.map(s => {
+                        if (s.id === targetStrategy!.id) {
+                            return {
+                                ...s,
+                                script: {
+                                    enabled: true,
+                                    buyScript: preset.buyScript,
+                                    sellScript: preset.sellScript,
+                                    template: selectedTemplate.value
+                                }
+                            };
+                        }
+                        return s;
+                    });
+                    
+                    await store.setStrategies(updatedStrategies);
+                    strategyProvider.refresh();
+                    vscode.window.showInformationMessage(`已应用模板 "${preset.name}" 到策略 "${targetStrategy.name}"`);
+                }
+            } else if (configType.value === 'custom') {
+                // 自定义脚本配置
+                const scriptType = await vscode.window.showQuickPick([
+                    { label: '配置买入脚本', value: 'buy' },
+                    { label: '配置卖出脚本', value: 'sell' }
+                ], { placeHolder: '选择要配置的脚本类型' });
+                
+                if (!scriptType) return;
+                
+                const currentScript = scriptType.value === 'buy' 
+                    ? targetStrategy.script?.buyScript || ''
+                    : targetStrategy.script?.sellScript || '';
+                
+                const scriptContent = await vscode.window.showInputBox({
+                    prompt: `输入${scriptType.label}内容（Pine脚本语法）`,
+                    value: currentScript,
+                    placeHolder: '例如：rsi(14) < 30 and close < sma(20)'
+                });
+                
+                if (scriptContent !== undefined) {
+                    updatedStrategies = strategies.map(s => {
+                        if (s.id === targetStrategy!.id) {
+                            const updatedScript = s.script ? { ...s.script } : { enabled: true, buyScript: '', sellScript: '', template: 'custom' };
+                            if (scriptType.value === 'buy') {
+                                updatedScript.buyScript = scriptContent;
+                            } else {
+                                updatedScript.sellScript = scriptContent;
+                            }
+                            return { ...s, script: updatedScript };
+                        }
+                        return s;
+                    });
+                    
+                    await store.setStrategies(updatedStrategies);
+                    strategyProvider.refresh();
+                    vscode.window.showInformationMessage(`策略 "${targetStrategy.name}" 的${scriptType.label}已更新`);
+                }
+            } else if (configType.value === 'toggle') {
+                // 启用/禁用策略
+                const currentEnabled = targetStrategy.script?.enabled ?? false;
+                const newEnabled = !currentEnabled;
+                
+                updatedStrategies = strategies.map(s => {
+                    if (s.id === targetStrategy!.id) {
+                        return {
+                            ...s,
+                            script: {
+                                enabled: newEnabled,
+                                buyScript: s.script?.buyScript || '',
+                                sellScript: s.script?.sellScript || '',
+                                template: s.script?.template || 'custom'
+                            }
+                        };
+                    }
+                    return s;
+                });
+                
+                await store.setStrategies(updatedStrategies);
+                strategyProvider.refresh();
+                vscode.window.showInformationMessage(`策略 "${targetStrategy.name}" 已${newEnabled ? '启用' : '禁用'}`);
+            }
+        })
+    );
+
+    // 配置策略信号
+    context.subscriptions.push(
+        vscode.commands.registerCommand('efinance.configureStrategySignals', async (item?: StockTreeItem) => {
+            let targetStrategy: Strategy | undefined;
+            
+            if (item && item.contextValue === 'efinance.strategyItem') {
+                // 从右键菜单调用
+                const strategies = store.getStrategies();
+                targetStrategy = strategies.find(s => s.name === item.label);
+            } else {
+                // 从命令面板调用
+                const strategies = store.getStrategies();
+                if (strategies.length === 0) {
+                    vscode.window.showInformationMessage('请先创建策略');
+                    return;
+                }
+                const strategyItems = strategies.map(s => ({
+                    label: s.name,
+                    description: `${s.symbols.length} 支股票`,
+                    strategy: s
+                }));
+                const selected = await vscode.window.showQuickPick(strategyItems, {
+                    placeHolder: '选择要配置信号的策略'
+                });
+                if (!selected) return;
+                targetStrategy = selected.strategy;
+            }
+
+            if (!targetStrategy) return;
+
+            // 配置买入条件
+            const buyEnabled = await vscode.window.showQuickPick(
+                [{ label: '启用', value: true }, { label: '禁用', value: false }],
+                { placeHolder: '是否启用买入信号？' }
+            );
+            if (buyEnabled === undefined) return;
+
+            let buyPriceThreshold: number | undefined;
+            let buyChangeThreshold: number | undefined;
+
+            if (buyEnabled.value) {
+                const buyPriceStr = await vscode.window.showInputBox({
+                    prompt: '设置买入价格阈值（可选，留空则不设置）',
+                    validateInput: (v) => v && isNaN(Number(v)) ? '请输入有效数字' : null
+                });
+                buyPriceThreshold = buyPriceStr ? parseFloat(buyPriceStr) : undefined;
+
+                const buyChangeStr = await vscode.window.showInputBox({
+                    prompt: '设置买入涨跌幅阈值（如-0.05表示跌5%时买入，可选）',
+                    validateInput: (v) => v && (isNaN(Number(v)) || Number(v) > 1 || Number(v) < -1) ? '请输入-1到1之间的数字' : null
+                });
+                buyChangeThreshold = buyChangeStr ? parseFloat(buyChangeStr) : undefined;
+            }
+
+            // 配置卖出条件
+            const sellEnabled = await vscode.window.showQuickPick(
+                [{ label: '启用', value: true }, { label: '禁用', value: false }],
+                { placeHolder: '是否启用卖出信号？' }
+            );
+            if (sellEnabled === undefined) return;
+
+            let sellPriceThreshold: number | undefined;
+            let sellChangeThreshold: number | undefined;
+
+            if (sellEnabled.value) {
+                const sellPriceStr = await vscode.window.showInputBox({
+                    prompt: '设置卖出价格阈值（可选，留空则不设置）',
+                    validateInput: (v) => v && isNaN(Number(v)) ? '请输入有效数字' : null
+                });
+                sellPriceThreshold = sellPriceStr ? parseFloat(sellPriceStr) : undefined;
+
+                const sellChangeStr = await vscode.window.showInputBox({
+                    prompt: '设置卖出涨跌幅阈值（如0.10表示涨10%时卖出，可选）',
+                    validateInput: (v) => v && (isNaN(Number(v)) || Number(v) > 1 || Number(v) < -1) ? '请输入-1到1之间的数字' : null
+                });
+                sellChangeThreshold = sellChangeStr ? parseFloat(sellChangeStr) : undefined;
+            }
+
+            // 更新策略配置
+            const strategies = store.getStrategies();
+            const updatedStrategies = strategies.map(s => {
+                if (s.id === targetStrategy!.id) {
+                    return {
+                        ...s,
+                        signals: {
+                            buyConditions: {
+                                enabled: buyEnabled.value,
+                                priceThreshold: buyPriceThreshold,
+                                changeThreshold: buyChangeThreshold
+                            },
+                            sellConditions: {
+                                enabled: sellEnabled.value,
+                                priceThreshold: sellPriceThreshold,
+                                changeThreshold: sellChangeThreshold
+                            },
+                            notifications: {
+                                showPopup: true,
+                                playSound: false
+                            }
+                        }
+                    };
+                }
+                return s;
+            });
+
+            await store.setStrategies(updatedStrategies);
+            strategyProvider.refresh();
+            vscode.window.showInformationMessage(`策略 "${targetStrategy.name}" 信号配置已更新`);
         })
     );
 
@@ -477,6 +986,9 @@ export function activate(context: vscode.ExtensionContext) {
                 }));
                 await store.setHoldings(holds);
                 
+                // 检查策略信号并发送通知
+                await checkAndNotifySignals(quotes, source);
+                
                 console.log(`[refreshAll] 数据更新完成，来源: ${source}`);
             }
 
@@ -491,6 +1003,126 @@ export function activate(context: vscode.ExtensionContext) {
             console.log(`[refreshAll] ${message}`);
         })
     );
+
+    // 检查策略信号并发送通知的函数（支持Pine脚本和传统策略）
+    async function checkAndNotifySignals(quotes: Record<string, { price: number; change: number }>, source: string) {
+        const strategies = store.getStrategies();
+        
+        for (const strategy of strategies) {
+            // 跳过没有配置任何信号的策略
+            if (!strategy.signals && !(strategy.type === 'script' && strategy.script?.enabled)) {
+                continue;
+            }
+            
+            for (const symbol of strategy.symbols) {
+                const quote = quotes[symbol];
+                if (!quote) continue;
+                
+                // 优先使用Pine脚本策略
+                if (strategy.type === 'script' && strategy.script?.enabled) {
+                    await checkScriptSignalsAndNotify(strategy, symbol, quote);
+                } else if (strategy.signals) {
+                    // 传统阈值策略
+                    await checkTraditionalSignalsAndNotify(strategy, symbol, quote);
+                }
+            }
+        }
+    }
+    
+    // Pine脚本信号检查和通知
+    async function checkScriptSignalsAndNotify(strategy: Strategy, symbol: string, quote: { price: number; change: number }) {
+        if (!strategy.script) return;
+        
+        try {
+            const { PineScriptParser } = require('./scriptParser');
+            
+            // 创建脚本执行上下文
+            const context = {
+                symbol: symbol,
+                price: quote.price,
+                change: quote.change,
+                changePercent: quote.change * 100,
+                historicalPrices: Array(20).fill(quote.price),
+                indicatorCache: new Map()
+            };
+            
+            const parser = new PineScriptParser(context);
+            
+            // 检查买入脚本
+            if (strategy.script.buyScript) {
+                const buyResult = parser.execute(strategy.script.buyScript);
+                if (buyResult.success && buyResult.value) {
+                    const message = `🟢 买入信号：${symbol} - Pine脚本策略触发`;
+                    vscode.window.showInformationMessage(message);
+                    console.log(`[Pine脚本信号] ${strategy.name}: ${message}`);
+                }
+            }
+            
+            // 检查卖出脚本
+            if (strategy.script.sellScript) {
+                const sellResult = parser.execute(strategy.script.sellScript);
+                if (sellResult.success && sellResult.value) {
+                    const message = `🔴 卖出信号：${symbol} - Pine脚本策略触发`;
+                    vscode.window.showWarningMessage(message);
+                    console.log(`[Pine脚本信号] ${strategy.name}: ${message}`);
+                }
+            }
+            
+        } catch (error) {
+            console.error(`[Pine脚本] 策略 ${strategy.name} 执行错误:`, error);
+        }
+    }
+    
+    // 传统阈值策略信号检查和通知
+    async function checkTraditionalSignalsAndNotify(strategy: Strategy, symbol: string, quote: { price: number; change: number }) {
+        const { buyConditions, sellConditions, notifications } = strategy.signals!;
+        
+        // 检查买入信号
+        if (buyConditions?.enabled) {
+            let shouldBuy = false;
+            let reason = '';
+            
+            if (buyConditions.priceThreshold !== undefined && quote.price <= buyConditions.priceThreshold) {
+                shouldBuy = true;
+                reason += `价格 ${quote.price} 低于买入阈值 ${buyConditions.priceThreshold}`;
+            }
+            
+            if (buyConditions.changeThreshold !== undefined && quote.change <= buyConditions.changeThreshold) {
+                shouldBuy = true;
+                if (reason) reason += '，';
+                reason += `涨跌幅 ${(quote.change * 100).toFixed(2)}% 达到买入条件 ${(buyConditions.changeThreshold * 100).toFixed(2)}%`;
+            }
+            
+            if (shouldBuy && notifications?.showPopup) {
+                const message = `🟢 买入信号：${symbol} - ${reason}`;
+                vscode.window.showInformationMessage(message);
+                console.log(`[策略信号] ${strategy.name}: ${message}`);
+            }
+        }
+        
+        // 检查卖出信号
+        if (sellConditions?.enabled) {
+            let shouldSell = false;
+            let reason = '';
+            
+            if (sellConditions.priceThreshold !== undefined && quote.price >= sellConditions.priceThreshold) {
+                shouldSell = true;
+                reason += `价格 ${quote.price} 高于卖出阈值 ${sellConditions.priceThreshold}`;
+            }
+            
+            if (sellConditions.changeThreshold !== undefined && quote.change >= sellConditions.changeThreshold) {
+                shouldSell = true;
+                if (reason) reason += '，';
+                reason += `涨跌幅 ${(quote.change * 100).toFixed(2)}% 达到卖出条件 ${(sellConditions.changeThreshold * 100).toFixed(2)}%`;
+            }
+            
+            if (shouldSell && notifications?.showPopup) {
+                const message = `🔴 卖出信号：${symbol} - ${reason}`;
+                vscode.window.showWarningMessage(message);
+                console.log(`[策略信号] ${strategy.name}: ${message}`);
+            }
+        }
+    }
 
     // 设置可配置的定时刷新
     setupAutoRefresh(context);

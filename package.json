@@ -2,7 +2,7 @@
   "name": "efinance-stocks",
   "displayName": "EFinance Stocks",
   "description": "一个类似 LeekFund 的股票监控扩展：自选股、持仓股、策略监听",
-  "version": "0.0.5",
+  "version": "0.0.7",
   "repository": {
     "type": "git",
     "url": "https://github.com/cxczy/watchstock-vscode-plugin.git"
@@ -81,6 +81,22 @@
       {
         "command": "efinance.removeItem",
         "title": "删除"
+      },
+      {
+        "command": "efinance.addStockToStrategy",
+        "title": "添加股票到策略"
+      },
+      {
+        "command": "efinance.configureStrategySignals",
+        "title": "配置策略信号"
+      },
+      {
+        "command": "efinance.addScriptStrategy",
+        "title": "创建Pine脚本策略"
+      },
+      {
+        "command": "efinance.configureScriptStrategy",
+        "title": "配置Pine脚本策略"
       }
     ],
     "menus": {
@@ -119,6 +135,26 @@
         },
         {
           "command": "efinance.removeItem",
+          "when": "view == efinance.strategies && viewItem == efinance.strategyItem",
+          "group": "inline"
+        },
+        {
+          "command": "efinance.addStockToStrategy",
+          "when": "view == efinance.strategies && viewItem == efinance.strategyItem",
+          "group": "inline"
+        },
+        {
+          "command": "efinance.configureStrategySignals",
+          "when": "view == efinance.strategies && viewItem == efinance.strategyItem",
+          "group": "inline"
+        },
+        {
+          "command": "efinance.addScriptStrategy",
+          "when": "view == efinance.strategies",
+          "group": "inline"
+        },
+        {
+          "command": "efinance.configureScriptStrategy",
           "when": "view == efinance.strategies && viewItem == efinance.strategyItem",
           "group": "inline"
         }
