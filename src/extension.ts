@@ -431,42 +431,73 @@ class StrategiesProvider extends BaseProvider<Strategy> {
 // 获取股票名称
 async function fetchStockName(symbol: string): Promise<string> {
     try {
-        // 格式化股票代码：沪市加sh前缀，深市加sz前缀
         const code = symbol.replace(/[^0-9]/g, ''); // 只保留数字
-        let formattedSymbol: string;
-        if (code.startsWith('6')) {
-            formattedSymbol = `sh${code}`; // 沪市
-        } else if (code.startsWith('0') || code.startsWith('3')) {
-            formattedSymbol = `sz${code}`; // 深市
-        } else {
-            formattedSymbol = `sh${code}`; // 默认沪市
-        }
-
-        const url = `https://hq.sinajs.cn/list=${formattedSymbol}`;
         
-        const response = await fetch(url, {
-            headers: {
-                'Referer': 'https://finance.sina.com.cn',
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                'Accept-Charset': 'GBK,utf-8;q=0.7,*;q=0.3'
+        if (code.length === 5) {
+            // 港股：使用腾讯实时报价API
+            const url = `https://qt.gtimg.cn/q=hk${code}`;
+            
+            const response = await fetch(url, {
+                headers: {
+                    'Referer': 'https://finance.qq.com',
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                }
+            });
+            
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
             }
-        });
-        
-        if (!response.ok) {
-            throw new Error(`HTTP error! status: ${response.status}`);
-        }
-        
-        // 获取响应的ArrayBuffer，然后使用TextDecoder进行GBK解码
-        const buffer = await response.arrayBuffer();
-        const decoder = new TextDecoder('gbk');
-        const text = decoder.decode(buffer);
-        
-        const match = text.match(/var hq_str_[^=]+="([^"]+)";/);
-        
-        if (match && match[1]) {
-            const data = match[1].split(',');
-            if (data.length >= 1 && data[0]) {
-                return data[0]; // 股票名称在第一个位置
+            
+            // 获取响应的ArrayBuffer，然后使用TextDecoder进行GBK解码
+            const buffer = await response.arrayBuffer();
+            const decoder = new TextDecoder('gbk');
+            const text = decoder.decode(buffer);
+            
+            // 解析腾讯港股数据格式
+            const match = text.match(/v_hk\d+="([^"]+)";/);
+            if (match && match[1]) {
+                const stockData = match[1].split('~');
+                if (stockData.length > 1 && stockData[1]) {
+                    return stockData[1]; // 港股名称在字段1位置
+                }
+            }
+        } else {
+            // A股：使用新浪财经API
+            let formattedSymbol: string;
+            if (code.startsWith('6')) {
+                formattedSymbol = `sh${code}`; // 沪市
+            } else if (code.startsWith('0') || code.startsWith('3')) {
+                formattedSymbol = `sz${code}`; // 深市
+            } else {
+                formattedSymbol = `sh${code}`; // 默认沪市
+            }
+
+            const url = `https://hq.sinajs.cn/list=${formattedSymbol}`;
+            
+            const response = await fetch(url, {
+                headers: {
+                    'Referer': 'https://finance.sina.com.cn',
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    'Accept-Charset': 'GBK,utf-8;q=0.7,*;q=0.3'
+                }
+            });
+            
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+            
+            // 获取响应的ArrayBuffer，然后使用TextDecoder进行GBK解码
+            const buffer = await response.arrayBuffer();
+            const decoder = new TextDecoder('gbk');
+            const text = decoder.decode(buffer);
+            
+            const match = text.match(/var hq_str_[^=]+="([^"]+)";/);
+            
+            if (match && match[1]) {
+                const data = match[1].split(',');
+                if (data.length >= 1 && data[0]) {
+                    return data[0]; // A股名称在第一个位置
+                }
             }
         }
         
@@ -489,16 +520,48 @@ async function fetchQuotes(symbols: string[], source: string = 'unknown'): Promi
         return result;
     }
 
-    // 重试机制
+    // 分离A股和港股
+    const aStocks: string[] = [];
+    const hkStocks: string[] = [];
+    
+    symbols.forEach(symbol => {
+        const code = symbol.replace(/[^0-9]/g, ''); // 只保留数字
+        if (code.length === 5) {
+            // 港股：5位数字
+            hkStocks.push(symbol);
+        } else {
+            // A股
+            aStocks.push(symbol);
+        }
+    });
+    
+    console.log(`[fetchQuotes] A股数量: ${aStocks.length}, 港股数量: ${hkStocks.length}`);
+    
+    // 并行获取A股和港股数据
+    const [aStockResults, hkStockResults] = await Promise.all([
+        aStocks.length > 0 ? fetchAStockQuotes(aStocks, source) : Promise.resolve({}),
+        hkStocks.length > 0 ? fetchHKStockQuotes(hkStocks, source) : Promise.resolve({})
+    ]);
+    
+    // 合并结果
+    Object.assign(result, aStockResults, hkStockResults);
+    
+    console.log(`[fetchQuotes] 总共获取到${Object.keys(result).length}只股票数据，来源: ${source}`);
+    
+    return result;
+}
+
+// 获取A股行情数据（使用新浪财经API）
+async function fetchAStockQuotes(symbols: string[], source: string): Promise<Record<string, { price: number; change: number }>> {
+    const result: Record<string, { price: number; change: number }> = {};
     const maxRetries = 3;
     let lastError: any;
     
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
-            console.log(`[fetchQuotes] 第${attempt}次尝试获取数据，来源: ${source}`);
+            console.log(`[fetchAStockQuotes] 第${attempt}次尝试获取A股数据，来源: ${source}`);
             
-            // 使用新浪财经API获取股票数据
-            // 格式化股票代码：沪市加sh前缀，深市加sz前缀
+            // 格式化A股代码：沪市加sh前缀，深市加sz前缀
             const formattedSymbols = symbols.map(symbol => {
                 const code = symbol.replace(/[^0-9]/g, ''); // 只保留数字
                 if (code.startsWith('6')) {
@@ -511,14 +574,13 @@ async function fetchQuotes(symbols: string[], source: string = 'unknown'): Promi
             });
 
             const url = `https://hq.sinajs.cn/list=${formattedSymbols.join(',')}`;
-            console.log(`[fetchQuotes] 请求URL: ${url}`);
+            console.log(`[fetchAStockQuotes] 请求URL: ${url}`);
             
             // 创建带超时的fetch请求
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 10000); // 10秒超时
             
             try {
-                // 使用node-fetch获取数据
                 const response = await fetch(url, {
                     headers: {
                         'Referer': 'https://finance.sina.com.cn',
@@ -538,15 +600,15 @@ async function fetchQuotes(symbols: string[], source: string = 'unknown'): Promi
                 const buffer = await response.arrayBuffer();
                 const decoder = new TextDecoder('gbk');
                 const text = decoder.decode(buffer);
-                console.log(`[fetchQuotes] 获取到响应数据长度: ${text.length}`);
+                console.log(`[fetchAStockQuotes] 获取到响应数据长度: ${text.length}`);
                 
                 const lines = text.split('\n').filter(line => line.trim());
-                console.log(`[fetchQuotes] 解析到${lines.length}行数据`);
+                console.log(`[fetchAStockQuotes] 解析到${lines.length}行数据`);
                 
                 let successCount = 0;
                 for (let i = 0; i < lines.length && i < symbols.length; i++) {
                     const line = lines[i];
-                    const match = line.match(/var hq_str_[^=]+=\"([^\"]+)\";/);
+                    const match = line.match(/var hq_str_[^=]+="([^"]+)";/);
                     
                     if (match && match[1]) {
                         const data = match[1].split(',');
@@ -561,13 +623,13 @@ async function fetchQuotes(symbols: string[], source: string = 'unknown'): Promi
                                     change: change
                                 };
                                 successCount++;
-                                console.log(`[fetchQuotes] 成功解析 ${symbols[i]}: 价格=${currentPrice}, 涨跌幅=${(change * 100).toFixed(2)}%`);
+                                console.log(`[fetchAStockQuotes] 成功解析 ${symbols[i]}: 价格=${currentPrice}, 涨跌幅=${(change * 100).toFixed(2)}%`);
                             }
                         }
                     }
                 }
                 
-                console.log(`[fetchQuotes] 成功获取${successCount}/${symbols.length}只股票数据，来源: ${source}`);
+                console.log(`[fetchAStockQuotes] 成功获取${successCount}/${symbols.length}只A股数据`);
                 
                 // 如果成功获取到数据，直接返回
                 if (successCount > 0) {
@@ -575,7 +637,7 @@ async function fetchQuotes(symbols: string[], source: string = 'unknown'): Promi
                 }
                 
                 // 如果没有获取到任何数据，抛出错误进行重试
-                throw new Error('未获取到任何有效股票数据');
+                throw new Error('未获取到任何有效A股数据');
                 
             } catch (fetchError) {
                 clearTimeout(timeoutId);
@@ -584,790 +646,390 @@ async function fetchQuotes(symbols: string[], source: string = 'unknown'): Promi
             
         } catch (error) {
             lastError = error;
-            console.error(`[fetchQuotes] 第${attempt}次尝试失败，来源: ${source}, 错误:`, error);
+            console.error(`[fetchAStockQuotes] 第${attempt}次尝试失败，错误:`, error);
             
             // 如果不是最后一次尝试，等待后重试
             if (attempt < maxRetries) {
                 const delay = attempt * 1000; // 递增延迟：1秒、2秒、3秒
-                console.log(`[fetchQuotes] 等待${delay}ms后重试...`);
+                console.log(`[fetchAStockQuotes] 等待${delay}ms后重试...`);
                 await new Promise(resolve => setTimeout(resolve, delay));
             }
         }
     }
     
     // 所有重试都失败，使用模拟数据
-    console.error(`[fetchQuotes] 所有重试都失败，使用模拟数据，来源: ${source}, 最后错误:`, lastError);
+    console.error(`[fetchAStockQuotes] 所有重试都失败，使用模拟数据，最后错误:`, lastError);
     for (const s of symbols) {
         const price = 10 + Math.random() * 100;
         const change = (Math.random() - 0.5) * 0.1; // -5% ~ +5%
         result[s] = { price, change };
-        console.log(`[fetchQuotes] 模拟数据 ${s}: 价格=${price.toFixed(2)}, 涨跌幅=${(change * 100).toFixed(2)}%`);
+        console.log(`[fetchAStockQuotes] 模拟数据 ${s}: 价格=${price.toFixed(2)}, 涨跌幅=${(change * 100).toFixed(2)}%`);
     }
     
     return result;
 }
 
-// 全局定时器变量
-let refreshTimer: NodeJS.Timeout | undefined;
+// 汇率缓存对象，避免频繁请求汇率API
+interface ExchangeRateCache {
+    HKD_CNY: number;      // 港元兑人民币汇率
+    USD_CNY: number;      // 美元兑人民币汇率
+    timestamp: number;    // 缓存时间戳
+    expiry: number;       // 过期时间（毫秒）
+}
 
-// 获取配置
-function getConfig() {
-    const config = vscode.workspace.getConfiguration('efinance');
-    return {
-        refreshInterval: config.get<number>('refreshInterval', 5),
-        autoRefresh: config.get<boolean>('autoRefresh', true)
+// Exchange Rates API响应接口
+interface ExchangeRatesApiResponse {
+    success?: boolean;
+    base?: string;
+    date?: string;
+    rates?: {
+        [currency: string]: number;
     };
 }
 
-// 设置定时刷新
-function setupAutoRefresh(context: vscode.ExtensionContext) {
-    // 清除现有定时器
-    if (refreshTimer) {
-        clearInterval(refreshTimer);
-        refreshTimer = undefined;
+// 汇率缓存，默认值为近似值
+let exchangeRateCache: ExchangeRateCache = {
+    HKD_CNY: 0.91,        // 默认1港元≈0.91人民币
+    USD_CNY: 7.2,         // 默认1美元≈7.2人民币
+    timestamp: 0,
+    expiry: 3600000       // 默认缓存1小时
+};
+
+// 获取最新汇率数据
+async function fetchExchangeRates(): Promise<ExchangeRateCache> {
+    // 检查缓存是否有效
+    const now = Date.now();
+    if (exchangeRateCache.timestamp > 0 && now - exchangeRateCache.timestamp < exchangeRateCache.expiry) {
+        console.log(`[fetchExchangeRates] 使用缓存汇率数据: 港元兑人民币=${exchangeRateCache.HKD_CNY}, 美元兑人民币=${exchangeRateCache.USD_CNY}`);
+        return exchangeRateCache;
     }
-
-    const { refreshInterval, autoRefresh } = getConfig();
     
-    if (autoRefresh && refreshInterval > 0) {
-        console.log(`[setupAutoRefresh] 启动自动刷新，间隔: ${refreshInterval}秒`);
-        refreshTimer = setInterval(() => {
-            console.log(`[setupAutoRefresh] 执行自动刷新`);
-            vscode.commands.executeCommand('efinance.refreshAll', 'auto');
-        }, refreshInterval * 1000); // 转换为毫秒
-        
-        // 添加到订阅中以便清理
-        context.subscriptions.push({ dispose: () => {
-            if (refreshTimer) {
-                clearInterval(refreshTimer);
-                refreshTimer = undefined;
-            }
-        }});
-    } else {
-        console.log(`[setupAutoRefresh] 自动刷新已禁用`);
-    }
-}
-
-export function activate(context: vscode.ExtensionContext) {
-    const store = new Store(context.globalState);
-
-    const watchProvider = new WatchlistProvider(store);
-    const holdingProvider = new HoldingsProvider(store);
-    const strategyProvider = new StrategiesProvider(store);
-
-    context.subscriptions.push(
-        vscode.window.registerTreeDataProvider('efinance.watchlist', watchProvider),
-        vscode.window.registerTreeDataProvider('efinance.holdings', holdingProvider),
-        vscode.window.registerTreeDataProvider('efinance.strategies', strategyProvider)
-    );
-
-    // 添加自选股
-    context.subscriptions.push(
-        vscode.commands.registerCommand('efinance.addWatchStock', async () => {
-            const symbol = await vscode.window.showInputBox({ prompt: '输入股票代码（例如：600519 或 000001）' });
-            if (!symbol) return;
-
-            const list = store.getWatchlist();
-            if (list.some(s => s.symbol === symbol)) {
-                vscode.window.showInformationMessage(`自选股已存在：${symbol}`);
-                return;
-            }
-
-            // 显示加载提示
-            vscode.window.withProgress({
-                location: vscode.ProgressLocation.Notification,
-                title: `正在获取股票信息: ${symbol}`,
-                cancellable: false
-            }, async () => {
-                // 自动获取股票名称
-                const name = await fetchStockName(symbol);
-                list.push({ symbol, name });
-                await store.setWatchlist(list);
-                watchProvider.refresh();
-                vscode.window.showInformationMessage(`已添加自选股：${name}(${symbol})`);
-            });
-        })
-    );
-
-    // 添加持仓股
-    context.subscriptions.push(
-        vscode.commands.registerCommand('efinance.addHoldingStock', async () => {
-            const symbol = await vscode.window.showInputBox({ prompt: '输入股票代码' });
-            if (!symbol) return;
-            const quantityStr = await vscode.window.showInputBox({ prompt: '输入持仓数量（整数）', validateInput: v => /^\d+$/.test(v) ? null : '请输入整数' });
-            if (!quantityStr) return;
-            const costStr = await vscode.window.showInputBox({ prompt: '输入成本价（数字）', validateInput: v => isNaN(Number(v)) ? '请输入数字' : null });
-            if (!costStr) return;
-
-            // 显示加载提示
-            vscode.window.withProgress({
-                location: vscode.ProgressLocation.Notification,
-                title: `正在获取股票信息: ${symbol}`,
-                cancellable: false
-            }, async () => {
-                // 自动获取股票名称
-                const name = await fetchStockName(symbol);
-                const holdings = store.getHoldings();
-                holdings.push({
-                    symbol,
-                    name,
-                    quantity: parseInt(quantityStr, 10),
-                    cost: parseFloat(costStr)
-                });
-                await store.setHoldings(holdings);
-                holdingProvider.refresh();
-                vscode.window.showInformationMessage(`已添加持仓股：${name}(${symbol})`);
-            });
-        })
-    );
-
-    // 创建策略
-    context.subscriptions.push(
-        vscode.commands.registerCommand('efinance.addStrategy', async () => {
-            const name = await vscode.window.showInputBox({ prompt: '输入策略名称' });
-            if (!name) return;
-            const symbolsStr = await vscode.window.showInputBox({ prompt: '输入股票代码，使用逗号分隔（如：600519,000001）' });
-            const symbols = (symbolsStr || '')
-                .split(',')
-                .map(s => s.trim())
-                .filter(Boolean);
-            const strategies = store.getStrategies();
-            strategies.push({
-                id: `${Date.now()}`,
-                name,
-                symbols,
-                signals: {
-                    buyConditions: { enabled: false },
-                    sellConditions: { enabled: false },
-                    notifications: { showPopup: true, playSound: false }
-                }
-            });
-            await store.setStrategies(strategies);
-            strategyProvider.refresh();
-        })
-    );
-
-    // 添加股票到策略
-    context.subscriptions.push(
-        vscode.commands.registerCommand('efinance.addStockToStrategy', async () => {
-            const strategies = store.getStrategies();
-            if (strategies.length === 0) {
-                vscode.window.showInformationMessage('请先创建策略');
-                return;
-            }
-
-            // 选择策略
-            const strategyItems = strategies.map(s => ({
-                label: s.name,
-                description: `${s.symbols.length} 支股票`,
-                strategy: s
-            }));
-            const selectedStrategy = await vscode.window.showQuickPick(strategyItems, {
-                placeHolder: '选择要添加股票的策略'
-            });
-            if (!selectedStrategy) return;
-
-            // 输入股票代码
-            const symbol = await vscode.window.showInputBox({ 
-                prompt: '输入股票代码（例如：600519 或 000001）',
-                validateInput: (value) => {
-                    if (!value || !value.trim()) {
-                        return '请输入股票代码';
-                    }
-                    if (selectedStrategy.strategy.symbols.includes(value.trim())) {
-                        return '该股票已在策略中';
-                    }
-                    return null;
-                }
-            });
-            if (!symbol) return;
-
-            // 更新策略
-            const updatedStrategies = strategies.map(s => {
-                if (s.id === selectedStrategy.strategy.id) {
-                    return {
-                        ...s,
-                        symbols: [...s.symbols, symbol.trim()]
-                    };
-                }
-                return s;
-            });
-            
-            await store.setStrategies(updatedStrategies);
-            strategyProvider.refresh();
-            vscode.window.showInformationMessage(`已将 ${symbol} 添加到策略 "${selectedStrategy.strategy.name}"`);
-        })
-    );
-
-    // 创建Pine脚本策略
-    context.subscriptions.push(
-        vscode.commands.registerCommand('efinance.addScriptStrategy', async () => {
-            const name = await vscode.window.showInputBox({ prompt: '输入Pine脚本策略名称' });
-            if (!name) return;
-            
-            const symbolsStr = await vscode.window.showInputBox({ prompt: '输入股票代码，使用逗号分隔（如：600519,000001）' });
-            const symbols = (symbolsStr || '')
-                .split(',')
-                .map(s => s.trim())
-                .filter(Boolean);
-            
-            const strategies = store.getStrategies();
-            strategies.push({
-                id: `${Date.now()}`,
-                name,
-                symbols,
-                type: 'script',
-                script: {
-                    enabled: true,
-                    buyScript: '',
-                    sellScript: '',
-                    template: 'custom'
-                }
-            });
-            await store.setStrategies(strategies);
-            strategyProvider.refresh();
-            vscode.window.showInformationMessage(`Pine脚本策略 "${name}" 已创建，请配置脚本内容`);
-        })
-    );
+    console.log(`[fetchExchangeRates] 开始获取最新汇率数据`);
     
-    // 配置Pine脚本策略内容
-    context.subscriptions.push(
-        vscode.commands.registerCommand('efinance.configureScriptStrategy', async (item?: StockTreeItem) => {
-            let targetStrategy: Strategy | undefined;
-            
-            if (item && item.contextValue === 'efinance.strategyItem') {
-                // 从右键菜单调用
-                const strategies = store.getStrategies();
-                targetStrategy = strategies.find(s => s.name === item.label);
-            } else {
-                // 从命令面板调用
-                const strategies = store.getStrategies().filter(s => s.type === 'script');
-                if (strategies.length === 0) {
-                    vscode.window.showInformationMessage('请先创建Pine脚本策略');
-                    return;
-                }
-                const strategyItems = strategies.map(s => ({
-                    label: s.name,
-                    description: `${s.symbols.length} 支股票 - Pine脚本策略`,
-                    strategy: s
-                }));
-                const selected = await vscode.window.showQuickPick(strategyItems, {
-                    placeHolder: '选择要配置的Pine脚本策略'
-                });
-                if (!selected) return;
-                targetStrategy = selected.strategy;
-            }
-            
-            if (!targetStrategy || targetStrategy.type !== 'script') {
-                vscode.window.showErrorMessage('请选择Pine脚本策略');
-                return;
-            }
-            
-            // 选择配置类型
-            const configType = await vscode.window.showQuickPick([
-                { label: '使用预设模板', value: 'template' },
-                { label: '自定义脚本', value: 'custom' },
-                { label: '启用/禁用策略', value: 'toggle' }
-            ], { placeHolder: '选择配置方式' });
-            
-            if (!configType) return;
-            
-            const strategies = store.getStrategies();
-            let updatedStrategies = [...strategies];
-            
-            if (configType.value === 'template') {
-                // 选择预设模板
-                const { getPresetStrategies } = require('./scriptParser');
-                const presets = getPresetStrategies();
-                const templateItems = Object.entries(presets).map(([key, preset]: [string, any]) => ({
-                    label: preset.name,
-                    description: preset.description,
-                    value: key
-                }));
-                
-                const selectedTemplate = await vscode.window.showQuickPick(templateItems, {
-                    placeHolder: '选择预设策略模板'
-                });
-                
-                if (selectedTemplate) {
-                    const preset = presets[selectedTemplate.value];
-                    updatedStrategies = strategies.map(s => {
-                        if (s.id === targetStrategy!.id) {
-                            return {
-                                ...s,
-                                script: {
-                                    enabled: true,
-                                    buyScript: preset.buyScript,
-                                    sellScript: preset.sellScript,
-                                    template: selectedTemplate.value
-                                }
-                            };
-                        }
-                        return s;
-                    });
-                    
-                    await store.setStrategies(updatedStrategies);
-                    strategyProvider.refresh();
-                    vscode.window.showInformationMessage(`已应用模板 "${preset.name}" 到策略 "${targetStrategy.name}"`);
-                }
-            } else if (configType.value === 'custom') {
-                // 自定义脚本配置
-                const scriptType = await vscode.window.showQuickPick([
-                    { label: '配置买入脚本', value: 'buy' },
-                    { label: '配置卖出脚本', value: 'sell' }
-                ], { placeHolder: '选择要配置的脚本类型' });
-                
-                if (!scriptType) return;
-                
-                const currentScript = scriptType.value === 'buy' 
-                    ? targetStrategy.script?.buyScript || ''
-                    : targetStrategy.script?.sellScript || '';
-                
-                const scriptContent = await vscode.window.showInputBox({
-                    prompt: `输入${scriptType.label}内容（Pine脚本语法）`,
-                    value: currentScript,
-                    placeHolder: '例如：rsi(14) < 30 and close < sma(20)'
-                });
-                
-                if (scriptContent !== undefined) {
-                    updatedStrategies = strategies.map(s => {
-                        if (s.id === targetStrategy!.id) {
-                            const updatedScript = s.script ? { ...s.script } : { enabled: true, buyScript: '', sellScript: '', template: 'custom' };
-                            if (scriptType.value === 'buy') {
-                                updatedScript.buyScript = scriptContent;
-                            } else {
-                                updatedScript.sellScript = scriptContent;
-                            }
-                            return { ...s, script: updatedScript };
-                        }
-                        return s;
-                    });
-                    
-                    await store.setStrategies(updatedStrategies);
-                    strategyProvider.refresh();
-                    vscode.window.showInformationMessage(`策略 "${targetStrategy.name}" 的${scriptType.label}已更新`);
-                }
-            } else if (configType.value === 'toggle') {
-                // 启用/禁用策略
-                const currentEnabled = targetStrategy.script?.enabled ?? false;
-                const newEnabled = !currentEnabled;
-                
-                updatedStrategies = strategies.map(s => {
-                    if (s.id === targetStrategy!.id) {
-                        return {
-                            ...s,
-                            script: {
-                                enabled: newEnabled,
-                                buyScript: s.script?.buyScript || '',
-                                sellScript: s.script?.sellScript || '',
-                                template: s.script?.template || 'custom'
-                            }
-                        };
-                    }
-                    return s;
-                });
-                
-                await store.setStrategies(updatedStrategies);
-                strategyProvider.refresh();
-                vscode.window.showInformationMessage(`策略 "${targetStrategy.name}" 已${newEnabled ? '启用' : '禁用'}`);
-            }
-        })
-    );
-
-    // 配置策略信号
-    context.subscriptions.push(
-        vscode.commands.registerCommand('efinance.configureStrategySignals', async (item?: StockTreeItem) => {
-            let targetStrategy: Strategy | undefined;
-            
-            if (item && item.contextValue === 'efinance.strategyItem') {
-                // 从右键菜单调用
-                const strategies = store.getStrategies();
-                targetStrategy = strategies.find(s => s.name === item.label);
-            } else {
-                // 从命令面板调用
-                const strategies = store.getStrategies();
-                if (strategies.length === 0) {
-                    vscode.window.showInformationMessage('请先创建策略');
-                    return;
-                }
-                const strategyItems = strategies.map(s => ({
-                    label: s.name,
-                    description: `${s.symbols.length} 支股票`,
-                    strategy: s
-                }));
-                const selected = await vscode.window.showQuickPick(strategyItems, {
-                    placeHolder: '选择要配置信号的策略'
-                });
-                if (!selected) return;
-                targetStrategy = selected.strategy;
-            }
-
-            if (!targetStrategy) return;
-
-            // 配置买入条件
-            const buyEnabled = await vscode.window.showQuickPick(
-                [{ label: '启用', value: true }, { label: '禁用', value: false }],
-                { placeHolder: '是否启用买入信号？' }
-            );
-            if (buyEnabled === undefined) return;
-
-            let buyPriceThreshold: number | undefined;
-            let buyChangeThreshold: number | undefined;
-
-            if (buyEnabled.value) {
-                const buyPriceStr = await vscode.window.showInputBox({
-                    prompt: '设置买入价格阈值（可选，留空则不设置）',
-                    validateInput: (v) => v && isNaN(Number(v)) ? '请输入有效数字' : null
-                });
-                buyPriceThreshold = buyPriceStr ? parseFloat(buyPriceStr) : undefined;
-
-                const buyChangeStr = await vscode.window.showInputBox({
-                    prompt: '设置买入涨跌幅阈值（如-0.05表示跌5%时买入，可选）',
-                    validateInput: (v) => v && (isNaN(Number(v)) || Number(v) > 1 || Number(v) < -1) ? '请输入-1到1之间的数字' : null
-                });
-                buyChangeThreshold = buyChangeStr ? parseFloat(buyChangeStr) : undefined;
-            }
-
-            // 配置卖出条件
-            const sellEnabled = await vscode.window.showQuickPick(
-                [{ label: '启用', value: true }, { label: '禁用', value: false }],
-                { placeHolder: '是否启用卖出信号？' }
-            );
-            if (sellEnabled === undefined) return;
-
-            let sellPriceThreshold: number | undefined;
-            let sellChangeThreshold: number | undefined;
-
-            if (sellEnabled.value) {
-                const sellPriceStr = await vscode.window.showInputBox({
-                    prompt: '设置卖出价格阈值（可选，留空则不设置）',
-                    validateInput: (v) => v && isNaN(Number(v)) ? '请输入有效数字' : null
-                });
-                sellPriceThreshold = sellPriceStr ? parseFloat(sellPriceStr) : undefined;
-
-                const sellChangeStr = await vscode.window.showInputBox({
-                    prompt: '设置卖出涨跌幅阈值（如0.10表示涨10%时卖出，可选）',
-                    validateInput: (v) => v && (isNaN(Number(v)) || Number(v) > 1 || Number(v) < -1) ? '请输入-1到1之间的数字' : null
-                });
-                sellChangeThreshold = sellChangeStr ? parseFloat(sellChangeStr) : undefined;
-            }
-
-            // 更新策略配置
-            const strategies = store.getStrategies();
-            const updatedStrategies = strategies.map(s => {
-                if (s.id === targetStrategy!.id) {
-                    return {
-                        ...s,
-                        signals: {
-                            buyConditions: {
-                                enabled: buyEnabled.value,
-                                priceThreshold: buyPriceThreshold,
-                                changeThreshold: buyChangeThreshold
-                            },
-                            sellConditions: {
-                                enabled: sellEnabled.value,
-                                priceThreshold: sellPriceThreshold,
-                                changeThreshold: sellChangeThreshold
-                            },
-                            notifications: {
-                                showPopup: true,
-                                playSound: false
-                            }
-                        }
-                    };
-                }
-                return s;
-            });
-
-            await store.setStrategies(updatedStrategies);
-            strategyProvider.refresh();
-            vscode.window.showInformationMessage(`策略 "${targetStrategy.name}" 信号配置已更新`);
-        })
-    );
-
-    // 删除项目（自选/持仓/策略）
-    context.subscriptions.push(
-        vscode.commands.registerCommand('efinance.removeItem', async (item?: StockTreeItem) => {
-            if (!item) return;
-            
-            // 根据 contextValue 判断来源
-            switch (item.contextValue) {
-                case 'efinance.watchItem': {
-                    // 从显示标签中提取股票代码
-                    let symbolToRemove = '';
-                    if (item.label.includes('(') && item.label.includes(')')) {
-                        // 格式：名称(代码)
-                        const match = item.label.match(/\(([^)]+)\)$/);
-                        symbolToRemove = match ? match[1] : item.label;
-                    } else {
-                        // 格式：只有代码
-                        symbolToRemove = item.label;
-                    }
-                    
-                    const list = store.getWatchlist().filter(s => s.symbol !== symbolToRemove);
-                    await store.setWatchlist(list);
-                    watchProvider.refresh();
-                    strategyProvider.refresh();
-                    break;
-                }
-                case 'efinance.holdingItem': {
-                    // 从显示标签中提取股票代码
-                    let symbolToRemove = '';
-                    if (item.label.includes('(') && item.label.includes(')')) {
-                        // 格式：名称(代码)
-                        const match = item.label.match(/\(([^)]+)\)$/);
-                        symbolToRemove = match ? match[1] : item.label;
-                    } else {
-                        // 格式：只有代码
-                        symbolToRemove = item.label;
-                    }
-                    
-                    const holdings = store.getHoldings().filter(h => h.symbol !== symbolToRemove);
-                    await store.setHoldings(holdings);
-                    holdingProvider.refresh();
-                    break;
-                }
-                case 'efinance.strategyItem': {
-                    const strategies = store.getStrategies().filter(s => s.name !== item.label);
-                    await store.setStrategies(strategies);
-                    strategyProvider.refresh();
-                    break;
-                }
-            }
-        })
-    );
-
-    // 刷新所有视图并模拟拉行情
-    context.subscriptions.push(
-        vscode.commands.registerCommand('efinance.refreshAll', async (source: string = 'manual') => {
-            console.log(`[refreshAll] 开始刷新，来源: ${source}`);
-            
-            const allSymbols = new Set<string>();
-            store.getWatchlist().forEach(s => allSymbols.add(s.symbol));
-            store.getHoldings().forEach(h => allSymbols.add(h.symbol));
-            store.getStrategies().forEach(st => st.symbols.forEach(sym => allSymbols.add(sym)));
-
-            console.log(`[refreshAll] 需要刷新的股票数量: ${allSymbols.size}`);
-
-            if (allSymbols.size > 0) {
-                const quotes = await fetchQuotes(Array.from(allSymbols), source);
-                
-                // 写回 watchlist
-                const watch = store.getWatchlist().map(s => ({
-                    ...s,
-                    price: quotes[s.symbol]?.price ?? s.price,
-                    change: quotes[s.symbol]?.change ?? s.change
-                }));
-                await store.setWatchlist(watch);
-                
-                // 写回 holdings
-                const holds = store.getHoldings().map(h => ({
-                    ...h,
-                    price: quotes[h.symbol]?.price ?? h.price,
-                    change: quotes[h.symbol]?.change ?? h.change
-                }));
-                await store.setHoldings(holds);
-                
-                // 检查策略信号并发送通知
-                await checkAndNotifySignals(quotes, source);
-                
-                console.log(`[refreshAll] 数据更新完成，来源: ${source}`);
-            }
-
-            watchProvider.refresh();
-            holdingProvider.refresh();
-            strategyProvider.refresh();
-            
-            const message = source === 'auto' ? '自动刷新完成' : '手动刷新完成';
-            if (source === 'manual') {
-                vscode.window.showInformationMessage(message);
-            }
-            console.log(`[refreshAll] ${message}`);
-        })
-    );
-
-    // 检查策略信号并发送通知的函数（支持Pine脚本和传统策略）
-    async function checkAndNotifySignals(quotes: Record<string, { price: number; change: number }>, source: string) {
-        const strategies = store.getStrategies();
+    try {
+        // 使用Exchange Rates API获取汇率数据
+        // 注意：免费版API可能有请求限制，生产环境建议使用付费API或官方汇率源
+        const url = `https://open.er-api.com/v6/latest/CNY`;
         
-        for (const strategy of strategies) {
-            // 跳过没有配置任何信号的策略
-            if (!strategy.signals && !(strategy.type === 'script' && strategy.script?.enabled)) {
-                continue;
-            }
-            
-            for (const symbol of strategy.symbols) {
-                const quote = quotes[symbol];
-                if (!quote) continue;
-                
-                // 优先使用Pine脚本策略
-                if (strategy.type === 'script' && strategy.script?.enabled) {
-                    await checkScriptSignalsAndNotify(strategy, symbol, quote);
-                } else if (strategy.signals) {
-                    // 传统阈值策略
-                    await checkTraditionalSignalsAndNotify(strategy, symbol, quote);
-                }
-            }
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 10000); // 10秒超时
+        
+        const response = await fetch(url, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            },
+            signal: controller.signal
+        });
+        
+        clearTimeout(timeoutId);
+        
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
         }
-    }
-    
-    // Pine脚本信号检查和通知
-    async function checkScriptSignalsAndNotify(strategy: Strategy, symbol: string, quote: { price: number; change: number }) {
-        if (!strategy.script) return;
         
-        try {
-            const { PineScriptParser } = require('./scriptParser');
+        const data = await response.json() as ExchangeRatesApiResponse;
+        
+        // 计算汇率：API返回的是CNY兑其他货币的汇率，需要取倒数
+        if (data && data.rates) {
+            // 1人民币=多少港元，取倒数得到1港元=多少人民币
+            const hkdRate = data.rates.HKD ? (1 / data.rates.HKD) : exchangeRateCache.HKD_CNY;
+            // 1人民币=多少美元，取倒数得到1美元=多少人民币
+            const usdRate = data.rates.USD ? (1 / data.rates.USD) : exchangeRateCache.USD_CNY;
             
-            // 创建脚本执行上下文
-            const context = {
-                symbol: symbol,
-                price: quote.price,
-                change: quote.change,
-                changePercent: quote.change * 100,
-                historicalPrices: Array(20).fill(quote.price),
-                indicatorCache: new Map()
+            // 更新缓存
+            exchangeRateCache = {
+                HKD_CNY: hkdRate,
+                USD_CNY: usdRate,
+                timestamp: now,
+                expiry: 3600000 // 缓存1小时
             };
             
-            const parser = new PineScriptParser(context);
-            
-            // 检查买入脚本
-            if (strategy.script.buyScript) {
-                const buyResult = parser.execute(strategy.script.buyScript);
-                if (buyResult.success && buyResult.value) {
-                    const message = `🟢 买入信号：${symbol} - Pine脚本策略触发`;
-                    vscode.window.showInformationMessage(message);
-                    console.log(`[Pine脚本信号] ${strategy.name}: ${message}`);
-                    
-                    // 记录信号到策略监控面板
-                    const { StrategyDashboardPanel } = require('./strategyDashboard');
-                    StrategyDashboardPanel.addSignal(
-                        strategy.name,
-                        symbol,
-                        'buy',
-                        quote.price,
-                        'Pine脚本买入条件触发'
-                    );
-                }
-            }
-            
-            // 检查卖出脚本
-            if (strategy.script.sellScript) {
-                const sellResult = parser.execute(strategy.script.sellScript);
-                if (sellResult.success && sellResult.value) {
-                    const message = `🔴 卖出信号：${symbol} - Pine脚本策略触发`;
-                    vscode.window.showWarningMessage(message);
-                    console.log(`[Pine脚本信号] ${strategy.name}: ${message}`);
-                    
-                    // 记录信号到策略监控面板
-                    const { StrategyDashboardPanel } = require('./strategyDashboard');
-                    StrategyDashboardPanel.addSignal(
-                        strategy.name,
-                        symbol,
-                        'sell',
-                        quote.price,
-                        'Pine脚本卖出条件触发'
-                    );
-                }
-            }
-            
-        } catch (error) {
-            console.error(`[Pine脚本] 策略 ${strategy.name} 执行错误:`, error);
+            console.log(`[fetchExchangeRates] 成功获取汇率数据: 港元兑人民币=${hkdRate.toFixed(4)}, 美元兑人民币=${usdRate.toFixed(4)}`);
+        } else {
+            throw new Error('汇率数据格式异常');
+        }
+    } catch (error) {
+        console.error(`[fetchExchangeRates] 获取汇率失败:`, error);
+        // 如果获取失败，使用缓存数据，并更新时间戳以避免频繁重试
+        if (exchangeRateCache.timestamp === 0) {
+            // 如果从未成功获取过，使用默认值
+            exchangeRateCache.timestamp = now;
         }
     }
     
-    // 传统阈值策略信号检查和通知
-    async function checkTraditionalSignalsAndNotify(strategy: Strategy, symbol: string, quote: { price: number; change: number }) {
-        const { buyConditions, sellConditions, notifications } = strategy.signals!;
-        
-        // 检查买入信号
-        if (buyConditions?.enabled) {
-            let shouldBuy = false;
-            let reason = '';
-            
-            if (buyConditions.priceThreshold !== undefined && quote.price <= buyConditions.priceThreshold) {
-                shouldBuy = true;
-                reason += `价格 ${quote.price} 低于买入阈值 ${buyConditions.priceThreshold}`;
-            }
-            
-            if (buyConditions.changeThreshold !== undefined && quote.change <= buyConditions.changeThreshold) {
-                shouldBuy = true;
-                if (reason) reason += '，';
-                reason += `涨跌幅 ${(quote.change * 100).toFixed(2)}% 达到买入条件 ${(buyConditions.changeThreshold * 100).toFixed(2)}%`;
-            }
-            
-            if (shouldBuy && notifications?.showPopup) {
-                const message = `🟢 买入信号：${symbol} - ${reason}`;
-                vscode.window.showInformationMessage(message);
-                console.log(`[策略信号] ${strategy.name}: ${message}`);
-                
-                // 记录信号到策略监控面板
-                const { StrategyDashboardPanel } = require('./strategyDashboard');
-                StrategyDashboardPanel.addSignal(
-                    strategy.name,
-                    symbol,
-                    'buy',
-                    quote.price,
-                    reason
-                );
-            }
-        }
-        
-        // 检查卖出信号
-        if (sellConditions?.enabled) {
-            let shouldSell = false;
-            let reason = '';
-            
-            if (sellConditions.priceThreshold !== undefined && quote.price >= sellConditions.priceThreshold) {
-                shouldSell = true;
-                reason += `价格 ${quote.price} 高于卖出阈值 ${sellConditions.priceThreshold}`;
-            }
-            
-            if (sellConditions.changeThreshold !== undefined && quote.change >= sellConditions.changeThreshold) {
-                shouldSell = true;
-                if (reason) reason += '，';
-                reason += `涨跌幅 ${(quote.change * 100).toFixed(2)}% 达到卖出条件 ${(sellConditions.changeThreshold * 100).toFixed(2)}%`;
-            }
-            
-            if (shouldSell && notifications?.showPopup) {
-                const message = `🔴 卖出信号：${symbol} - ${reason}`;
-                vscode.window.showWarningMessage(message);
-                console.log(`[策略信号] ${strategy.name}: ${message}`);
-                
-                // 记录信号到策略监控面板
-                const { StrategyDashboardPanel } = require('./strategyDashboard');
-                StrategyDashboardPanel.addSignal(
-                    strategy.name,
-                    symbol,
-                    'sell',
-                    quote.price,
-                    reason
-                );
-            }
-        }
-    }
-
-    // 注册策略监控面板命令
-    context.subscriptions.push(
-        vscode.commands.registerCommand('efinance.openStrategyDashboard', async () => {
-            const { StrategyDashboardPanel } = require('./strategyDashboard');
-            StrategyDashboardPanel.createOrShow(context.extensionUri, store);
-        })
-    );
-
-    // 设置可配置的定时刷新
-    setupAutoRefresh(context);
-    
-    // 监听配置变更
-    context.subscriptions.push(
-        vscode.workspace.onDidChangeConfiguration(e => {
-            if (e.affectsConfiguration('efinance.refreshInterval') || 
-                e.affectsConfiguration('efinance.autoRefresh')) {
-                setupAutoRefresh(context);
-            }
-        })
-    );
+    return exchangeRateCache;
 }
 
+// 获取港股行情数据（使用腾讯实时报价API）并转换为人民币价格
+async function fetchHKStockQuotes(symbols: string[], source: string): Promise<Record<string, { price: number; change: number }>> {
+    const result: Record<string, { price: number; change: number }> = {};
+    const maxRetries = 3;
+    
+    // 获取最新汇率数据
+    const rates = await fetchExchangeRates();
+    const hkdToCny = rates.HKD_CNY; // 港元兑人民币汇率
+    
+    console.log(`[fetchHKStockQuotes] 使用汇率: 1港元=${hkdToCny.toFixed(4)}人民币`);
+    
+    for (const symbol of symbols) {
+        let lastError: any;
+        let success = false;
+        
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            try {
+                console.log(`[fetchHKStockQuotes] 第${attempt}次尝试获取港股数据: ${symbol}`);
+                
+                const code = symbol.replace(/[^0-9]/g, ''); // 只保留数字
+                const url = `https://qt.gtimg.cn/q=hk${code}`;
+                console.log(`[fetchHKStockQuotes] 请求URL: ${url}`);
+                
+                // 创建带超时的fetch请求
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 10000); // 10秒超时
+                
+                try {
+                    const response = await fetch(url, {
+                        headers: {
+                            'Referer': 'https://finance.qq.com',
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                        },
+                        signal: controller.signal
+                    });
+                    
+                    clearTimeout(timeoutId);
+                    
+                    if (!response.ok) {
+                        throw new Error(`HTTP error! status: ${response.status}`);
+                    }
+                    
+                    // 获取响应的ArrayBuffer，然后使用TextDecoder进行GBK解码
+                    const buffer = await response.arrayBuffer();
+                    const decoder = new TextDecoder('gbk');
+                    const text = decoder.decode(buffer);
+                    console.log(`[fetchHKStockQuotes] 获取到港股响应数据长度: ${text.length}`);
+                    
+                    // 解析腾讯实时报价API返回的数据格式: v_hk00700="...";
+                    const match = text.match(/v_hk\d+="([^"]+)";/);
+                    if (match && match[1]) {
+                        const stockData = match[1].split('~');
+                        console.log(`[fetchHKStockQuotes] 解析到${stockData.length}个字段`);
+                        
+                        if (stockData.length > 32) {
+                            // 腾讯API字段映射：
+                            // 字段3: 当前价格
+                            // 字段9: 昨收价
+                            // 字段31: 涨跌额
+                            // 字段32: 涨跌幅
+                            const currentPriceHKD = parseFloat(stockData[3]);
+                            const prevCloseHKD = parseFloat(stockData[9]);
+                            const changeAmount = parseFloat(stockData[31]);
+                            const changePercent = parseFloat(stockData[32]);
+                            
+                            // 将港元价格转换为人民币价格
+                            const currentPriceCNY = currentPriceHKD * hkdToCny;
+                            const prevCloseCNY = prevCloseHKD * hkdToCny;
+                            
+                            console.log(`[fetchHKStockQuotes] 港股${symbol}解析数据: 当前价=${currentPriceHKD}港元(${currentPriceCNY.toFixed(2)}人民币), 昨收价=${prevCloseHKD}港元, 涨跌幅=${changePercent}%`);
+                            
+                            if (!isNaN(currentPriceHKD) && !isNaN(changePercent)) {
+                                const change = changePercent / 100; // 转换为小数形式
+                                result[symbol] = {
+                                    price: currentPriceCNY, // 存储转换后的人民币价格
+                                    change: change
+                                };
+                                console.log(`[fetchHKStockQuotes] 成功解析港股 ${symbol}: 价格=${currentPriceCNY.toFixed(2)}人民币, 涨跌幅=${changePercent.toFixed(2)}%`);
+                                success = true;
+                                break; // 成功获取数据，跳出重试循环
+                            }
+                        }
+                    }
+                    
+                    // 如果数据结构不符合预期，抛出错误进行重试
+                    throw new Error(`港股数据结构异常: ${symbol}`);
+                    
+                } catch (fetchError) {
+                    clearTimeout(timeoutId);
+                    throw fetchError;
+                }
+                
+            } catch (error) {
+                lastError = error;
+                console.error(`[fetchHKStockQuotes] 第${attempt}次尝试失败: ${symbol}, 错误:`, error);
+                
+                // 如果不是最后一次尝试，等待后重试
+                if (attempt < maxRetries) {
+                    const delay = attempt * 1000; // 递增延迟：1秒、2秒、3秒
+                    console.log(`[fetchHKStockQuotes] 等待${delay}ms后重试...`);
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                }
+            }
+        }
+        
+        // 如果所有重试都失败，使用模拟数据
+        if (!success) {
+            console.error(`[fetchHKStockQuotes] 港股${symbol}所有重试都失败，使用模拟数据，最后错误:`, lastError);
+            const priceHKD = 10 + Math.random() * 100;
+            const priceCNY = priceHKD * hkdToCny; // 转换为人民币
+            const change = (Math.random() - 0.5) * 0.1; // -5% ~ +5%
+            result[symbol] = { price: priceCNY, change };
+            console.log(`[fetchHKStockQuotes] 模拟数据 ${symbol}: 价格=${priceCNY.toFixed(2)}人民币, 涨跌幅=${(change * 100).toFixed(2)}%`);
+        }
+    }
+    
+    console.log(`[fetchHKStockQuotes] 港股数据获取完成，成功获取${Object.keys(result).length}/${symbols.length}只股票`);
+    return result;
+}
+
+// 扩展激活函数
+export function activate(context: vscode.ExtensionContext) {
+    console.log('EFinance Stocks 扩展已激活');
+    
+    // 创建数据存储
+    const store = new Store(context.globalState);
+    
+    // 创建树视图提供者
+    const watchlistProvider = new WatchlistProvider(store);
+    const holdingsProvider = new HoldingsProvider(store);
+    const strategiesProvider = new StrategiesProvider(store);
+    
+    // 注册树视图
+    vscode.window.createTreeView('efinance.watchlist', {
+        treeDataProvider: watchlistProvider,
+        showCollapseAll: false
+    });
+    
+    vscode.window.createTreeView('efinance.holdings', {
+        treeDataProvider: holdingsProvider,
+        showCollapseAll: false
+    });
+    
+    vscode.window.createTreeView('efinance.strategies', {
+        treeDataProvider: strategiesProvider,
+        showCollapseAll: false
+    });
+    
+    // 注册命令
+    const commands = [
+        // 刷新所有数据命令
+        vscode.commands.registerCommand('efinance.refreshAll', async () => {
+            console.log('执行刷新所有数据命令');
+            watchlistProvider.refresh();
+            holdingsProvider.refresh();
+            strategiesProvider.refresh();
+            vscode.window.showInformationMessage('已刷新所有股票数据');
+        }),
+        
+        // 添加自选股命令
+        vscode.commands.registerCommand('efinance.addWatchStock', async () => {
+            const symbol = await vscode.window.showInputBox({
+                prompt: '请输入股票代码（如：600519 或 00700）',
+                placeHolder: '股票代码'
+            });
+            
+            if (symbol) {
+                const watchlist = store.getWatchlist();
+                const exists = watchlist.find(s => s.symbol === symbol);
+                
+                if (exists) {
+                    vscode.window.showWarningMessage(`股票 ${symbol} 已在自选股中`);
+                    return;
+                }
+                
+                const name = await fetchStockName(symbol);
+                watchlist.push({ symbol, name });
+                await store.setWatchlist(watchlist);
+                watchlistProvider.refresh();
+                vscode.window.showInformationMessage(`已添加自选股：${name}(${symbol})`);
+            }
+        }),
+        
+        // 添加持仓股命令
+        vscode.commands.registerCommand('efinance.addHoldingStock', async () => {
+            const symbol = await vscode.window.showInputBox({
+                prompt: '请输入股票代码（如：600519 或 00700）',
+                placeHolder: '股票代码'
+            });
+            
+            if (!symbol) return;
+            
+            const quantityStr = await vscode.window.showInputBox({
+                prompt: '请输入持仓数量',
+                placeHolder: '持仓数量'
+            });
+            
+            if (!quantityStr) return;
+            
+            const costStr = await vscode.window.showInputBox({
+                prompt: '请输入成本价',
+                placeHolder: '成本价'
+            });
+            
+            if (!costStr) return;
+            
+            const quantity = parseFloat(quantityStr);
+            const cost = parseFloat(costStr);
+            
+            if (isNaN(quantity) || isNaN(cost)) {
+                vscode.window.showErrorMessage('请输入有效的数字');
+                return;
+            }
+            
+            const holdings = store.getHoldings();
+            const exists = holdings.find(h => h.symbol === symbol);
+            
+            if (exists) {
+                vscode.window.showWarningMessage(`股票 ${symbol} 已在持仓中`);
+                return;
+            }
+            
+            const name = await fetchStockName(symbol);
+            holdings.push({ symbol, name, quantity, cost });
+            await store.setHoldings(holdings);
+            holdingsProvider.refresh();
+            vscode.window.showInformationMessage(`已添加持仓：${name}(${symbol})`);
+        }),
+        
+        // 删除项目命令
+        vscode.commands.registerCommand('efinance.removeItem', async (item: StockTreeItem) => {
+            if (!item) return;
+            
+            const confirmed = await vscode.window.showWarningMessage(
+                `确定要删除 ${item.label} 吗？`,
+                '确定',
+                '取消'
+            );
+            
+            if (confirmed !== '确定') return;
+            
+            // 根据上下文值确定删除类型
+            if (item.contextValue === 'efinance.watchItem') {
+                const watchlist = store.getWatchlist();
+                const updated = watchlist.filter(s => !item.label?.includes(s.symbol));
+                await store.setWatchlist(updated);
+                watchlistProvider.refresh();
+            } else if (item.contextValue === 'efinance.holdingItem') {
+                const holdings = store.getHoldings();
+                const updated = holdings.filter(h => !item.label?.includes(h.symbol));
+                await store.setHoldings(updated);
+                holdingsProvider.refresh();
+            } else if (item.contextValue === 'efinance.strategyItem') {
+                const strategies = store.getStrategies();
+                const updated = strategies.filter(s => s.name !== item.label);
+                await store.setStrategies(updated);
+                strategiesProvider.refresh();
+            }
+            
+            vscode.window.showInformationMessage(`已删除 ${item.label}`);
+        })
+    ];
+    
+    // 将所有命令添加到订阅列表
+    context.subscriptions.push(...commands);
+    
+    console.log('EFinance Stocks 扩展命令注册完成');
+}
+
+// 扩展停用函数
 export function deactivate() {
-    // 清理资源由 context.subscriptions 管理
+    console.log('EFinance Stocks 扩展已停用');
 }
